@@ -17,8 +17,7 @@ import logging
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
@@ -1226,6 +1225,7 @@ Return ONLY valid JSON with these fields, nothing else.""",
             logger.error(f"Error in run method header: {str(e)}")
             st.error(f"Error in run method: {str(e)}")
             import traceback
+
             st.code(traceback.format_exc())
             logger.error(traceback.format_exc())
 
@@ -1244,15 +1244,15 @@ Return ONLY valid JSON with these fields, nothing else.""",
         logger.info("Rendering tab 3")
         with tab3:
             self.render_submission()
-        
+
         logger.info("Run method completed successfully")
 
 
 # Run the application
 if __name__ == "__main__":
-    logger.info("="*50)
+    logger.info("=" * 50)
     logger.info("Application starting")
-    logger.info("="*50)
+    logger.info("=" * 50)
     try:
         app = ExpenseReportApp()
         logger.info("App instance created, calling run()")
@@ -1261,6 +1261,7 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"FATAL ERROR in main: {str(e)}")
         import traceback
+
         logger.error(traceback.format_exc())
         st.error(f"Fatal error: {str(e)}")
         st.code(traceback.format_exc())

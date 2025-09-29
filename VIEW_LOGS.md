@@ -3,6 +3,7 @@
 ## 📋 Viewing Logs on Streamlit Cloud
 
 ### Method 1: From the Streamlit Cloud Dashboard
+
 1. Go to https://share.streamlit.io/
 2. Sign in with your GitHub account
 3. Find your app: **haas-expenses-ai**
@@ -13,10 +14,13 @@
 8. You'll see real-time logs with our debug output!
 
 ### Method 2: Direct URL
+
 Go to: `https://share.streamlit.io/[your-username]/haas_expense_automation`
 
 ### Method 3: From the App
+
 If the app is stuck or erroring:
+
 1. The error should appear on screen
 2. Check the browser console (F12) for JavaScript errors
 3. Check the Streamlit Cloud logs for Python errors
@@ -26,7 +30,7 @@ If the app is stuck or erroring:
 Our logging shows exactly where the app is:
 
 ```
-INFO - ================================================== 
+INFO - ==================================================
 INFO - Application starting
 INFO - ==================================================
 INFO - Initializing ExpenseReportApp
@@ -52,20 +56,24 @@ INFO - Run method completed successfully
 ## 🐛 Common Issues
 
 ### Stuck after "Preparing system..."
+
 - Check logs for import errors
 - Missing dependencies in requirements.txt
 
 ### Stuck after "Spinning up manager process..."
+
 - Check if secrets are configured
 - Look for "OpenAI API key missing" or "Google Sheets credentials missing"
 
 ### Blank page
+
 - Check browser console (F12)
 - Look for JavaScript errors
 
 ## ✅ Expected Output (Healthy App)
 
 When working correctly, you should see ALL these log messages in order:
+
 1. "Application starting"
 2. "Initializing ExpenseReportApp"
 3. "Session state setup complete"
