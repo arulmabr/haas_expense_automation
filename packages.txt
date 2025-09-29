@@ -1,1 +1,0 @@
-# No system packages needed - using GPT-5 vision for all processing
