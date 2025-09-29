@@ -8,9 +8,6 @@ from typing import Dict, List, Optional, Any
 import gspread
 from google.oauth2.service_account import Credentials
 import openai
-from pdf2image import convert_from_bytes
-import PyPDF2
-import pytesseract
 from PIL import Image
 import requests
 import os
@@ -126,46 +123,65 @@ class ExpenseReportApp:
             st.error(f"Failed to initialize Google Sheets client: {str(e)}")
             return None
 
-    def extract_text_from_pdf(self, pdf_file) -> str:
-        """Extract text from PDF using PyPDF2 and OCR fallback"""
+    def analyze_expense_with_gpt_image(
+        self, image_file, filename: str
+    ) -> Optional[ExpenseData]:
+        """Analyze expense image directly using GPT-5 vision API"""
         try:
-            # First try PyPDF2 for text-based PDFs
-            reader = PyPDF2.PdfReader(pdf_file)
-            text = ""
-            for page in reader.pages:
-                page_text = page.extract_text()
-                if page_text.strip():
-                    text += page_text + "\n"
+            # Read and encode image
+            image_file.seek(0)
+            image_bytes = image_file.read()
+            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
 
-            # If we got substantial text, return it
-            if len(text.strip()) > 50:
-                return text
+            # Determine image format
+            image_format = "jpeg"
+            if filename.lower().endswith(".png"):
+                image_format = "png"
+            elif filename.lower().endswith(".gif"):
+                image_format = "gif"
+            elif filename.lower().endswith(".webp"):
+                image_format = "webp"
 
-            # Fallback to OCR for scanned PDFs
-            st.info("PDF appears to be scanned. Using OCR to extract text...")
-            pdf_file.seek(0)  # Reset file pointer
-            images = convert_from_bytes(pdf_file.read())
-            ocr_text = ""
+            response = self.client.chat.completions.create(
+                model="gpt-5",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": self.get_expense_analysis_prompt(),
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:image/{image_format};base64,{image_base64}"
+                                },
+                            },
+                        ],
+                    }
+                ],
+                max_completion_tokens=1024,
+                verbosity="medium",
+                reasoning_effort="minimal",
+            )
 
-            for i, image in enumerate(images):
-                page_text = pytesseract.image_to_string(image)
-                ocr_text += f"Page {i+1}:\n{page_text}\n\n"
+            content = response.choices[0].message.content
+            data = json.loads(content)
 
-            return ocr_text
+            return ExpenseData(
+                filename=filename,
+                description=data.get("description") or "Unknown expense",
+                amount=float(data.get("amount") or 0),
+                currency=data.get("currency") or "USD",
+                date=data.get("date") or datetime.now().strftime("%Y-%m-%d"),
+                category=data.get("category") or "Other",
+                confidence=float(data.get("confidence") or 0),
+            )
 
         except Exception as e:
-            st.error(f"Error extracting text from PDF: {str(e)}")
-            return ""
-
-    def extract_text_from_image(self, image_file) -> str:
-        """Extract text from image using OCR"""
-        try:
-            image = Image.open(image_file)
-            text = pytesseract.image_to_string(image)
-            return text
-        except Exception as e:
-            st.error(f"Error extracting text from image: {str(e)}")
-            return ""
+            st.error(f"Error with GPT-5 image processing: {str(e)}")
+            return None
 
     def analyze_expense_with_gpt_direct_pdf(
         self, pdf_file, filename: str
@@ -903,7 +919,7 @@ Return ONLY valid JSON with these fields, nothing else.""",
             status_text.text(f"Processing {file.name}...")
 
             try:
-                # Use direct PDF processing for PDFs, fallback for images
+                # Use GPT-5 direct processing for both PDFs and images
                 if file.type == "application/pdf":
                     st.info(f"🚀 Using GPT-5 direct PDF processing for {file.name}")
                     expense_data = self.analyze_expense_with_gpt_direct_pdf(
@@ -915,38 +931,16 @@ Return ONLY valid JSON with these fields, nothing else.""",
                             f"✅ Processed {file.name} with GPT-5 direct PDF analysis"
                         )
                     else:
-                        st.warning(
-                            f"⚠️ GPT-5 direct PDF failed for {file.name}, trying text extraction..."
-                        )
-                        # Fallback to text extraction method
-                        text = self.extract_text_from_pdf(file)
-                        if text and text.strip():
-                            expense_data = self.analyze_expense_with_gpt_fallback(
-                                text, file.name
-                            )
-                            if expense_data:
-                                processed_expenses.append(expense_data)
-                                st.success(
-                                    f"✅ Processed {file.name} with GPT-5 fallback method"
-                                )
-                            else:
-                                st.error(f"❌ Failed to analyze {file.name}")
-                        else:
-                            st.error(f"❌ No text found in {file.name}")
+                        st.error(f"❌ Failed to analyze {file.name}")
                 else:
-                    # For images, use OCR + text analysis
-                    text = self.extract_text_from_image(file)
-                    if text and text.strip():
-                        expense_data = self.analyze_expense_with_gpt_fallback(
-                            text, file.name
-                        )
-                        if expense_data:
-                            processed_expenses.append(expense_data)
-                            st.success(f"✅ Processed {file.name} with GPT-5")
-                        else:
-                            st.error(f"❌ Failed to analyze {file.name}")
+                    # For images, use GPT-5 vision directly
+                    st.info(f"🚀 Using GPT-5 vision for {file.name}")
+                    expense_data = self.analyze_expense_with_gpt_image(file, file.name)
+                    if expense_data:
+                        processed_expenses.append(expense_data)
+                        st.success(f"✅ Processed {file.name} with GPT-5 vision")
                     else:
-                        st.warning(f"⚠️ No text found in {file.name}")
+                        st.error(f"❌ Failed to analyze {file.name}")
 
             except Exception as e:
                 st.error(f"❌ Error processing {file.name}: {str(e)}")
