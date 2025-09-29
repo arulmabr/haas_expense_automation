@@ -740,17 +740,20 @@ Return ONLY valid JSON with these fields, nothing else.""",
         # API Status
         st.sidebar.subheader("API Status")
 
-        # Check OpenAI
-        if self.get_openai_client():
-            st.sidebar.success("✅ OpenAI Connected")
+        # Check OpenAI - only check if API key exists, don't initialize
+        api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
+        if api_key:
+            st.sidebar.success("✅ OpenAI API Key Found")
         else:
-            st.sidebar.error("❌ OpenAI Not Connected")
+            st.sidebar.error("❌ OpenAI API Key Missing")
 
-        # Check Google Sheets
-        if self.get_google_sheets_client():
-            st.sidebar.success("✅ Google Sheets Connected")
+        # Check Google Sheets - only check if credentials exist, don't initialize
+        if "google_credentials" in st.secrets or os.path.exists(
+            "google-credentials.json"
+        ):
+            st.sidebar.success("✅ Google Sheets Credentials Found")
         else:
-            st.sidebar.error("❌ Google Sheets Not Connected")
+            st.sidebar.warning("⚠️ Google Sheets Credentials Missing")
 
         st.sidebar.markdown("---")
 
