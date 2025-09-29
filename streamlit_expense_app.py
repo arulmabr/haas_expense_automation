@@ -13,6 +13,14 @@ import requests
 import os
 from dataclasses import dataclass
 import urllib.parse
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Configure page
 st.set_page_config(
@@ -67,28 +75,38 @@ CURRENCY_OPTIONS = [
 
 class ExpenseReportApp:
     def __init__(self):
+        logger.info("Initializing ExpenseReportApp")
         self.setup_session_state()
+        logger.info("ExpenseReportApp initialized successfully")
 
     def setup_session_state(self):
         """Initialize session state variables"""
+        logger.info("Setting up session state")
         if "expenses" not in st.session_state:
             st.session_state.expenses = []
         if "metadata" not in st.session_state:
             st.session_state.metadata = {}
         if "processing_complete" not in st.session_state:
             st.session_state.processing_complete = False
+        logger.info("Session state setup complete")
 
     def get_openai_client(self):
         """Initialize OpenAI client"""
+        logger.info("Getting OpenAI client")
         api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
         if not api_key:
+            logger.error("OpenAI API key not found")
             st.error(
                 "OpenAI API key not found. Please set OPENAI_API_KEY in secrets or environment variables."
             )
             return None
         try:
-            return openai.OpenAI(api_key=api_key)
+            logger.info("Creating OpenAI client")
+            client = openai.OpenAI(api_key=api_key)
+            logger.info("OpenAI client created successfully")
+            return client
         except Exception as e:
+            logger.error(f"Failed to initialize OpenAI client: {str(e)}")
             st.error(f"Failed to initialize OpenAI client: {str(e)}")
             return None
 
@@ -735,6 +753,7 @@ Return ONLY valid JSON with these fields, nothing else.""",
 
     def render_sidebar(self):
         """Render the sidebar with configuration options"""
+        logger.info("Rendering sidebar")
         st.sidebar.title("🔧 Configuration")
 
         # API Status
@@ -744,18 +763,23 @@ Return ONLY valid JSON with these fields, nothing else.""",
         api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
         if api_key:
             st.sidebar.success("✅ OpenAI API Key Found")
+            logger.info("OpenAI API key found")
         else:
             st.sidebar.error("❌ OpenAI API Key Missing")
+            logger.warning("OpenAI API key missing")
 
         # Check Google Sheets - only check if credentials exist, don't initialize
         if "google_credentials" in st.secrets or os.path.exists(
             "google-credentials.json"
         ):
             st.sidebar.success("✅ Google Sheets Credentials Found")
+            logger.info("Google Sheets credentials found")
         else:
             st.sidebar.warning("⚠️ Google Sheets Credentials Missing")
+            logger.warning("Google Sheets credentials missing")
 
         st.sidebar.markdown("---")
+        logger.info("Sidebar rendered successfully")
 
         # Clear data button
         if st.sidebar.button("🗑️ Clear All Data"):
@@ -1186,33 +1210,57 @@ Return ONLY valid JSON with these fields, nothing else.""",
 
     def run(self):
         """Main application runner"""
+        logger.info("Starting main run method")
         try:
+            logger.info("Setting title and markdown")
             st.title("🤖 AI-Powered Expense Report Generator (GPT-5)")
             st.markdown(
                 "Upload your expense documents and let GPT-5 extract and categorize the information automatically with enhanced accuracy and speed!"
             )
 
             # Render sidebar
+            logger.info("About to render sidebar")
             self.render_sidebar()
+            logger.info("Sidebar rendered")
         except Exception as e:
+            logger.error(f"Error in run method header: {str(e)}")
             st.error(f"Error in run method: {str(e)}")
             import traceback
             st.code(traceback.format_exc())
+            logger.error(traceback.format_exc())
 
         # Main content area - simplified tabs without Event Info
+        logger.info("Creating tabs")
         tab1, tab2, tab3 = st.tabs(["📎 Upload & Event Info", "📊 Review", "🚀 Submit"])
 
+        logger.info("Rendering tab 1")
         with tab1:
             self.render_file_upload()
 
+        logger.info("Rendering tab 2")
         with tab2:
             self.render_expense_review()
 
+        logger.info("Rendering tab 3")
         with tab3:
             self.render_submission()
+        
+        logger.info("Run method completed successfully")
 
 
 # Run the application
 if __name__ == "__main__":
-    app = ExpenseReportApp()
-    app.run()
+    logger.info("="*50)
+    logger.info("Application starting")
+    logger.info("="*50)
+    try:
+        app = ExpenseReportApp()
+        logger.info("App instance created, calling run()")
+        app.run()
+        logger.info("App run() completed")
+    except Exception as e:
+        logger.error(f"FATAL ERROR in main: {str(e)}")
+        import traceback
+        logger.error(traceback.format_exc())
+        st.error(f"Fatal error: {str(e)}")
+        st.code(traceback.format_exc())
