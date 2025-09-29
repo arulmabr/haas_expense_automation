@@ -128,6 +128,11 @@ class ExpenseReportApp:
     ) -> Optional[ExpenseData]:
         """Analyze expense image directly using GPT-5 vision API"""
         try:
+            # Get OpenAI client
+            client = self.get_openai_client()
+            if not client:
+                return None
+
             # Read and encode image
             image_file.seek(0)
             image_bytes = image_file.read()
@@ -142,7 +147,7 @@ class ExpenseReportApp:
             elif filename.lower().endswith(".webp"):
                 image_format = "webp"
 
-            response = self.client.chat.completions.create(
+            response = client.chat.completions.create(
                 model="gpt-5",
                 messages=[
                     {
