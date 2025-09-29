@@ -1186,13 +1186,18 @@ Return ONLY valid JSON with these fields, nothing else.""",
 
     def run(self):
         """Main application runner"""
-        st.title("🤖 AI-Powered Expense Report Generator (GPT-5)")
-        st.markdown(
-            "Upload your expense documents and let GPT-5 extract and categorize the information automatically with enhanced accuracy and speed!"
-        )
+        try:
+            st.title("🤖 AI-Powered Expense Report Generator (GPT-5)")
+            st.markdown(
+                "Upload your expense documents and let GPT-5 extract and categorize the information automatically with enhanced accuracy and speed!"
+            )
 
-        # Render sidebar
-        self.render_sidebar()
+            # Render sidebar
+            self.render_sidebar()
+        except Exception as e:
+            st.error(f"Error in run method: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
 
         # Main content area - simplified tabs without Event Info
         tab1, tab2, tab3 = st.tabs(["📎 Upload & Event Info", "📊 Review", "🚀 Submit"])
