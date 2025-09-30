@@ -183,7 +183,7 @@ class ExpenseReportApp:
                         ],
                     }
                 ],
-                max_tokens=1024,
+                max_completion_tokens=1024,
             )
 
             content = response.choices[0].message.content
@@ -257,7 +257,7 @@ Return ONLY valid JSON with these fields, nothing else.""",
                         ],
                     },
                 ],
-                max_tokens=1024,
+                max_completion_tokens=1024,
             )
 
             result_text = response.choices[0].message.content.strip()
@@ -345,7 +345,7 @@ Return ONLY valid JSON with these fields, nothing else.""",
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_tokens=1024,
+                max_completion_tokens=1024,
             )
 
             result_text = response.choices[0].message.content.strip()
