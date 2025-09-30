@@ -187,6 +187,34 @@ class ExpenseReportApp:
             )
 
             content = response.choices[0].message.content
+            
+            if not content:
+                st.error("Empty response from GPT-5")
+                return None
+            
+            content = content.strip()
+            
+            # Handle markdown code blocks
+            if content.startswith("```json"):
+                content = content[7:]
+            elif content.startswith("```"):
+                content = content[3:]
+                
+            if content.endswith("```"):
+                content = content[:-3]
+            
+            content = content.strip()
+            
+            # Try to find JSON in the response if it's not pure JSON
+            if not content.startswith("{"):
+                start_idx = content.find("{")
+                end_idx = content.rfind("}") + 1
+                if start_idx != -1 and end_idx > start_idx:
+                    content = content[start_idx:end_idx]
+                else:
+                    st.error(f"No JSON object found in image response: {content[:200]}")
+                    return None
+            
             data = json.loads(content)
 
             return ExpenseData(
@@ -260,8 +288,8 @@ Return ONLY valid JSON with these fields, nothing else.""",
                 max_completion_tokens=1024,
             )
 
-            result_text = response.choices[0].message.content.strip()
-
+            result_text = response.choices[0].message.content
+            
             # Clean up the uploaded file
             try:
                 client.files.delete(uploaded_file.id)
@@ -270,10 +298,33 @@ Return ONLY valid JSON with these fields, nothing else.""",
 
             # Parse the JSON response
             try:
+                if not result_text:
+                    st.error("Empty response from GPT-5")
+                    return None
+                    
+                result_text = result_text.strip()
+                
+                # Handle markdown code blocks
                 if result_text.startswith("```json"):
                     result_text = result_text[7:]
+                elif result_text.startswith("```"):
+                    result_text = result_text[3:]
+                    
                 if result_text.endswith("```"):
                     result_text = result_text[:-3]
+                
+                result_text = result_text.strip()
+                
+                # Try to find JSON in the response if it's not pure JSON
+                if not result_text.startswith("{"):
+                    # Look for JSON object in the text
+                    start_idx = result_text.find("{")
+                    end_idx = result_text.rfind("}") + 1
+                    if start_idx != -1 and end_idx > start_idx:
+                        result_text = result_text[start_idx:end_idx]
+                    else:
+                        st.error(f"No JSON object found in response: {result_text[:200]}")
+                        return None
 
                 data = json.loads(result_text)
 
@@ -348,15 +399,36 @@ Return ONLY valid JSON with these fields, nothing else.""",
                 max_completion_tokens=1024,
             )
 
-            result_text = response.choices[0].message.content.strip()
+            result_text = response.choices[0].message.content
 
             # Try to extract JSON from the response
             try:
+                if not result_text:
+                    st.error("Empty response from GPT-5")
+                    return None
+                    
+                result_text = result_text.strip()
+                
                 # Remove any markdown formatting
                 if result_text.startswith("```json"):
                     result_text = result_text[7:]
+                elif result_text.startswith("```"):
+                    result_text = result_text[3:]
+                    
                 if result_text.endswith("```"):
                     result_text = result_text[:-3]
+                
+                result_text = result_text.strip()
+                
+                # Try to find JSON in the response if it's not pure JSON
+                if not result_text.startswith("{"):
+                    start_idx = result_text.find("{")
+                    end_idx = result_text.rfind("}") + 1
+                    if start_idx != -1 and end_idx > start_idx:
+                        result_text = result_text[start_idx:end_idx]
+                    else:
+                        st.error(f"No JSON object found in response: {result_text[:200]}")
+                        return None
 
                 data = json.loads(result_text)
 
