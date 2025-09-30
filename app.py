@@ -143,7 +143,7 @@ class ExpenseReportApp:
     def analyze_expense_with_gpt_image(
         self, image_file, filename: str
     ) -> Optional[ExpenseData]:
-        """Analyze expense image directly using GPT-4 vision API"""
+        """Analyze expense image directly using GPT-5 vision API"""
         try:
             # Get OpenAI client
             client = self.get_openai_client()
@@ -165,7 +165,7 @@ class ExpenseReportApp:
                 image_format = "webp"
 
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5",
                 messages=[
                     {
                         "role": "user",
@@ -200,13 +200,13 @@ class ExpenseReportApp:
             )
 
         except Exception as e:
-            st.error(f"Error with GPT-4 image processing: {str(e)}")
+            st.error(f"Error with GPT-5 image processing: {str(e)}")
             return None
 
     def analyze_expense_with_gpt_direct_pdf(
         self, pdf_file, filename: str
     ) -> Optional[ExpenseData]:
-        """Analyze PDF directly using GPT-4 vision without text extraction"""
+        """Analyze PDF directly using GPT-5 vision without text extraction"""
         client = self.get_openai_client()
         if not client:
             return None
@@ -216,9 +216,9 @@ class ExpenseReportApp:
             pdf_file.seek(0)  # Reset file pointer
             uploaded_file = client.files.create(file=pdf_file, purpose="user_data")
 
-            # Create chat completion with direct PDF input using GPT-4
+            # Create chat completion with direct PDF input using GPT-5
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-5",
                 messages=[
                     {
                         "role": "system",
@@ -301,7 +301,7 @@ Return ONLY valid JSON with these fields, nothing else.""",
     def analyze_expense_with_gpt_fallback(
         self, text: str, filename: str
     ) -> Optional[ExpenseData]:
-        """Fallback method: Analyze expense text using GPT-4 (for non-PDF files)"""
+        """Fallback method: Analyze expense text using GPT-5 (for non-PDF files)"""
         client = self.get_openai_client()
         if not client:
             return None
@@ -337,7 +337,7 @@ Return ONLY valid JSON with these fields, nothing else.""",
 
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",  # Use latest GPT-4 model
+                model="gpt-5",  # Use latest GPT-5 model
                 messages=[
                     {
                         "role": "system",
@@ -946,26 +946,26 @@ Return ONLY valid JSON with these fields, nothing else.""",
             status_text.text(f"Processing {file.name}...")
 
             try:
-                # Use GPT-4 direct processing for both PDFs and images
+                # Use GPT-5 direct processing for both PDFs and images
                 if file.type == "application/pdf":
-                    st.info(f"🚀 Using GPT-4 direct PDF processing for {file.name}")
+                    st.info(f"🚀 Using GPT-5 direct PDF processing for {file.name}")
                     expense_data = self.analyze_expense_with_gpt_direct_pdf(
                         file, file.name
                     )
                     if expense_data:
                         processed_expenses.append(expense_data)
                         st.success(
-                            f"✅ Processed {file.name} with GPT-4 direct PDF analysis"
+                            f"✅ Processed {file.name} with GPT-5 direct PDF analysis"
                         )
                     else:
                         st.error(f"❌ Failed to analyze {file.name}")
                 else:
-                    # For images, use GPT-4 vision directly
-                    st.info(f"🚀 Using GPT-4 vision for {file.name}")
+                    # For images, use GPT-5 vision directly
+                    st.info(f"🚀 Using GPT-5 vision for {file.name}")
                     expense_data = self.analyze_expense_with_gpt_image(file, file.name)
                     if expense_data:
                         processed_expenses.append(expense_data)
-                        st.success(f"✅ Processed {file.name} with GPT-4 vision")
+                        st.success(f"✅ Processed {file.name} with GPT-5 vision")
                     else:
                         st.error(f"❌ Failed to analyze {file.name}")
 
@@ -1208,9 +1208,9 @@ Return ONLY valid JSON with these fields, nothing else.""",
         logger.info("Starting main run method")
         try:
             logger.info("Setting title and markdown")
-            st.title("🤖 AI-Powered Expense Report Generator (GPT-4)")
+            st.title("🤖 AI-Powered Expense Report Generator (GPT-5)")
             st.markdown(
-                "Upload your expense documents and let GPT-4 extract and categorize the information automatically with enhanced accuracy and speed!"
+                "Upload your expense documents and let GPT-5 extract and categorize the information automatically with enhanced accuracy and speed!"
             )
 
             # Render sidebar

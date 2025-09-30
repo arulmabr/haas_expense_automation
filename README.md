@@ -1,6 +1,6 @@
 # AI Expense Report Generator
 
-GPT-4 powered expense report automation for Haas School of Business.
+GPT-5 powered expense report automation for Haas School of Business.
 
 ## Setup
 
@@ -12,5 +12,5 @@ GPT-4 powered expense report automation for Haas School of Business.
 
 The app is deployed at Streamlit Cloud with:
 - Python 3.11
-- GPT-4 for document processing
+- GPT-5 for document processing
 - Google Sheets integration
