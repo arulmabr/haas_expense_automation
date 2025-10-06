@@ -2,18 +2,19 @@ import streamlit as st
 import pandas as pd
 import json
 import base64
-import io
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+from datetime import datetime
+from typing import Dict, List, Optional
 import gspread
 from google.oauth2.service_account import Credentials
 import openai
-from PIL import Image
-import requests
 import os
 from dataclasses import dataclass
 import urllib.parse
 import logging
+import time
+from streamlit.runtime.scriptrunner.exceptions import RerunException
+import PyPDF2
+import io
 
 # Configure logging
 logging.basicConfig(
@@ -140,128 +141,194 @@ class ExpenseReportApp:
             st.error(f"Failed to initialize Google Sheets client: {str(e)}")
             return None
 
-    def analyze_expense_with_gpt_image(
-        self, image_file, filename: str
-    ) -> Optional[ExpenseData]:
-        """Analyze expense image directly using GPT-5 vision API"""
+    def extract_text_from_pdf(self, pdf_file) -> Optional[str]:
+        """Extract text from PDF file using PyPDF2"""
         try:
-            # Get OpenAI client
-            client = self.get_openai_client()
-            if not client:
-                return None
-
-            # Read and encode image
-            image_file.seek(0)
-            image_bytes = image_file.read()
-            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-
-            # Determine image format
-            image_format = "jpeg"
-            if filename.lower().endswith(".png"):
-                image_format = "png"
-            elif filename.lower().endswith(".gif"):
-                image_format = "gif"
-            elif filename.lower().endswith(".webp"):
-                image_format = "webp"
-
-            response = client.chat.completions.create(
-                model="gpt-5",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": self.get_expense_analysis_prompt(),
-                            },
-                            {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:image/{image_format};base64,{image_base64}"
-                                },
-                            },
-                        ],
-                    }
-                ],
-                max_completion_tokens=1024,
-            )
-
-            content = response.choices[0].message.content
-
-            if not content:
-                st.error("Empty response from GPT-5")
-                return None
-
-            content = content.strip()
-
-            # Handle markdown code blocks
-            if content.startswith("```json"):
-                content = content[7:]
-            elif content.startswith("```"):
-                content = content[3:]
-
-            if content.endswith("```"):
-                content = content[:-3]
-
-            content = content.strip()
-
-            # Try to find JSON in the response if it's not pure JSON
-            if not content.startswith("{"):
-                start_idx = content.find("{")
-                end_idx = content.rfind("}") + 1
-                if start_idx != -1 and end_idx > start_idx:
-                    content = content[start_idx:end_idx]
-                else:
-                    st.error(f"No JSON object found in image response: {content[:200]}")
-                    return None
-
-            data = json.loads(content)
-
-            return ExpenseData(
-                filename=filename,
-                description=data.get("description") or "Unknown expense",
-                amount=float(data.get("amount") or 0),
-                currency=data.get("currency") or "USD",
-                date=data.get("date") or datetime.now().strftime("%Y-%m-%d"),
-                category=data.get("category") or "Other",
-                confidence=float(data.get("confidence") or 0),
-            )
-
+            pdf_file.seek(0)
+            pdf_reader = PyPDF2.PdfReader(io.BytesIO(pdf_file.read()))
+            text = ""
+            for page in pdf_reader.pages:
+                text += page.extract_text() + "\n"
+            return text.strip() if text.strip() else None
         except Exception as e:
-            st.error(f"Error with GPT-5 image processing: {str(e)}")
+            logger.error(f"Failed to extract text from PDF: {str(e)}")
             return None
 
+    def get_expense_analysis_prompt(self) -> str:
+        """Get the standard expense analysis prompt for GPT"""
+        return """Analyze this expense document and extract the following information in JSON format:
+1. amount: the total amount paid (as a number, no currency symbols)
+2. currency: the currency code (USD, EUR, CAD, etc.) - default to USD if unclear
+3. description: a brief description of what this expense is for
+4. date: the transaction date in YYYY-MM-DD format. For hotels, use the first day of the stay
+5. category: categorize this into one of the following exact categories:
+   - "AIRFARE"
+   - "ACCOMMODATION (In US)"
+   - "ACCOMMODATION (Outside US)"
+   - "RAILWAY/BUS/TAXI (In US)"
+   - "RAILWAY/BUS/TAXI (Outside US)"
+   - "CAR RENTAL (In US)"
+   - "CAR RENTAL (Outside US)"
+   - "MEALS (In US)"
+   - "MEALS (Outside US)"
+   - "OTHER"
+6. confidence: a confidence score from 0.0 to 1.0 indicating how confident you are in the extraction
+
+Determine if this is in the US or not based on address, currency, or other indicators.
+Return ONLY valid JSON with these fields, nothing else."""
+
+    def analyze_expense_with_gpt_image(
+        self, image_file, filename: str, max_retries: int = 3
+    ) -> Optional[ExpenseData]:
+        """Analyze expense image directly using GPT-5 vision API"""
+        client = self.get_openai_client()
+        if not client:
+            return None
+
+        for attempt in range(max_retries):
+            try:
+                # Read and encode image
+                image_file.seek(0)
+                image_bytes = image_file.read()
+                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+
+                # Determine image format
+                image_format = "jpeg"
+                if filename.lower().endswith(".png"):
+                    image_format = "png"
+                elif filename.lower().endswith(".gif"):
+                    image_format = "gif"
+                elif filename.lower().endswith(".webp"):
+                    image_format = "webp"
+
+                response = client.chat.completions.create(
+                    model="gpt-5",
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": self.get_expense_analysis_prompt(),
+                                },
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/{image_format};base64,{image_base64}"
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    max_completion_tokens=1024,
+                )
+
+                content = response.choices[0].message.content
+
+                if not content:
+                    if attempt < max_retries - 1:
+                        st.warning(
+                            f"Empty response from GPT-5 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(2)
+                        continue
+                    else:
+                        st.error(
+                            f"Empty response from GPT-5 after {max_retries} attempts"
+                        )
+                        return None
+
+                content = content.strip()
+
+                # Handle markdown code blocks
+                if content.startswith("```json"):
+                    content = content[7:]
+                elif content.startswith("```"):
+                    content = content[3:]
+
+                if content.endswith("```"):
+                    content = content[:-3]
+
+                content = content.strip()
+
+                # Try to find JSON in the response if it's not pure JSON
+                if not content.startswith("{"):
+                    start_idx = content.find("{")
+                    end_idx = content.rfind("}") + 1
+                    if start_idx != -1 and end_idx > start_idx:
+                        content = content[start_idx:end_idx]
+                    else:
+                        if attempt < max_retries - 1:
+                            st.warning(
+                                f"Invalid JSON response for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
+                            )
+                            time.sleep(2)
+                            continue
+                        else:
+                            st.error(
+                                f"No JSON object found in image response: {content[:200]}"
+                            )
+                            return None
+
+                data = json.loads(content)
+
+                return ExpenseData(
+                    filename=filename,
+                    description=data.get("description") or "Unknown expense",
+                    amount=float(data.get("amount") or 0),
+                    currency=data.get("currency") or "USD",
+                    date=data.get("date") or datetime.now().strftime("%Y-%m-%d"),
+                    category=data.get("category") or "Other",
+                    confidence=float(data.get("confidence") or 0),
+                )
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    st.warning(
+                        f"Error processing {filename}, retrying... (Attempt {attempt + 1}/{max_retries}): {str(e)}"
+                    )
+                    time.sleep(2)
+                    continue
+                else:
+                    st.error(
+                        f"Error with GPT-5 image processing after {max_retries} attempts: {str(e)}"
+                    )
+                    return None
+
+        return None  # All retries exhausted
+
     def analyze_expense_with_gpt_direct_pdf(
-        self, pdf_file, filename: str
+        self, pdf_file, filename: str, max_retries: int = 3
     ) -> Optional[ExpenseData]:
         """Analyze PDF directly using GPT-5 vision without text extraction"""
         client = self.get_openai_client()
         if not client:
             return None
 
-        try:
-            # Upload the PDF file to OpenAI
-            pdf_file.seek(0)  # Reset file pointer
-            uploaded_file = client.files.create(file=pdf_file, purpose="user_data")
+        for attempt in range(max_retries):
+            try:
+                # Upload the PDF file to OpenAI
+                pdf_file.seek(0)  # Reset file pointer
+                uploaded_file = client.files.create(file=pdf_file, purpose="user_data")
 
-            # Create chat completion with direct PDF input using GPT-5
-            response = client.chat.completions.create(
-                model="gpt-5",
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an expert expense document analyzer. Analyze the PDF and return ONLY valid JSON with the specified fields.",
-                    },
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "file",
-                                "file": {"file_id": uploaded_file.id},
-                            },
-                            {
-                                "type": "text",
-                                "text": """Analyze this expense document and extract the following information in JSON format:
+                # Create chat completion with direct PDF input using GPT-5
+                response = client.chat.completions.create(
+                    model="gpt-5",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an expert expense document analyzer. Analyze the PDF and return ONLY valid JSON with the specified fields.",
+                        },
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "file",
+                                    "file": {"file_id": uploaded_file.id},
+                                },
+                                {
+                                    "type": "text",
+                                    "text": """Analyze this expense document and extract the following information in JSON format:
 1. amount: the total amount paid (as a number, no currency symbols)
 2. currency: the currency code (USD, EUR, CAD, etc.) - default to USD if unclear
 3. description: a brief description of what this expense is for
@@ -281,75 +348,109 @@ class ExpenseReportApp:
 
 Determine if this is in the US or not based on address, currency, or other indicators.
 Return ONLY valid JSON with these fields, nothing else.""",
-                            },
-                        ],
-                    },
-                ],
-                max_completion_tokens=1024,
-            )
-
-            result_text = response.choices[0].message.content
-
-            # Clean up the uploaded file
-            try:
-                client.files.delete(uploaded_file.id)
-            except:
-                pass  # File cleanup failed, but continue
-
-            # Parse the JSON response
-            try:
-                if not result_text:
-                    st.error("Empty response from GPT-5")
-                    return None
-
-                result_text = result_text.strip()
-
-                # Handle markdown code blocks
-                if result_text.startswith("```json"):
-                    result_text = result_text[7:]
-                elif result_text.startswith("```"):
-                    result_text = result_text[3:]
-
-                if result_text.endswith("```"):
-                    result_text = result_text[:-3]
-
-                result_text = result_text.strip()
-
-                # Try to find JSON in the response if it's not pure JSON
-                if not result_text.startswith("{"):
-                    # Look for JSON object in the text
-                    start_idx = result_text.find("{")
-                    end_idx = result_text.rfind("}") + 1
-                    if start_idx != -1 and end_idx > start_idx:
-                        result_text = result_text[start_idx:end_idx]
-                    else:
-                        st.error(
-                            f"No JSON object found in response: {result_text[:200]}"
-                        )
-                        return None
-
-                data = json.loads(result_text)
-
-                return ExpenseData(
-                    amount=float(data.get("amount", 0) or 0),
-                    currency=data.get("currency", "USD") or "USD",
-                    description=data.get("description", "Unknown expense")
-                    or "Unknown expense",
-                    date=data.get("date", datetime.now().strftime("%Y-%m-%d"))
-                    or datetime.now().strftime("%Y-%m-%d"),
-                    category=data.get("category", "OTHER") or "OTHER",
-                    filename=filename,
-                    confidence=float(data.get("confidence", 0.5) or 0.5),
+                                },
+                            ],
+                        },
+                    ],
+                    max_completion_tokens=1024,
                 )
 
-            except json.JSONDecodeError as e:
-                st.error(f"Failed to parse GPT response as JSON: {str(e)}")
-                st.error(f"Response was: {result_text}")
-                return None
+                result_text = response.choices[0].message.content
 
-        except Exception as e:
-            st.error(f"Error with direct PDF processing: {str(e)}")
-            return None
+                # Clean up the uploaded file
+                try:
+                    client.files.delete(uploaded_file.id)
+                except Exception:
+                    pass  # File cleanup failed, but continue
+
+                # Parse the JSON response
+                try:
+                    if not result_text:
+                        if attempt < max_retries - 1:
+                            st.warning(
+                                f"Empty response from GPT-5 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
+                            )
+                            time.sleep(2)  # Wait 2 seconds before retrying
+                            continue
+                        else:
+                            st.error(
+                                f"Empty response from GPT-5 after {max_retries} attempts"
+                            )
+                            return None
+
+                    result_text = result_text.strip()
+
+                    # Handle markdown code blocks
+                    if result_text.startswith("```json"):
+                        result_text = result_text[7:]
+                    elif result_text.startswith("```"):
+                        result_text = result_text[3:]
+
+                    if result_text.endswith("```"):
+                        result_text = result_text[:-3]
+
+                    result_text = result_text.strip()
+
+                    # Try to find JSON in the response if it's not pure JSON
+                    if not result_text.startswith("{"):
+                        # Look for JSON object in the text
+                        start_idx = result_text.find("{")
+                        end_idx = result_text.rfind("}") + 1
+                        if start_idx != -1 and end_idx > start_idx:
+                            result_text = result_text[start_idx:end_idx]
+                        else:
+                            if attempt < max_retries - 1:
+                                st.warning(
+                                    f"Invalid JSON response for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
+                                )
+                                time.sleep(2)
+                                continue
+                            else:
+                                st.error(
+                                    f"No JSON object found in response: {result_text[:200]}"
+                                )
+                                return None
+
+                    data = json.loads(result_text)
+
+                    return ExpenseData(
+                        amount=float(data.get("amount", 0) or 0),
+                        currency=data.get("currency", "USD") or "USD",
+                        description=data.get("description", "Unknown expense")
+                        or "Unknown expense",
+                        date=data.get("date", datetime.now().strftime("%Y-%m-%d"))
+                        or datetime.now().strftime("%Y-%m-%d"),
+                        category=data.get("category", "OTHER") or "OTHER",
+                        filename=filename,
+                        confidence=float(data.get("confidence", 0.5) or 0.5),
+                    )
+
+                except json.JSONDecodeError as e:
+                    if attempt < max_retries - 1:
+                        st.warning(
+                            f"Failed to parse JSON for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
+                        )
+                        time.sleep(2)
+                        continue
+                    else:
+                        st.error(f"Failed to parse GPT response as JSON: {str(e)}")
+                        st.error(f"Response was: {result_text}")
+                        return None
+
+            except Exception as e:
+                if attempt < max_retries - 1:
+                    st.warning(
+                        f"Error processing {filename}, retrying... (Attempt {attempt + 1}/{max_retries}): {str(e)}"
+                    )
+                    time.sleep(2)
+                    continue
+                else:
+                    st.error(
+                        f"Error with direct PDF processing after {max_retries} attempts: {str(e)}"
+                    )
+                    return None
+
+        return None  # All retries exhausted
 
     def analyze_expense_with_gpt_fallback(
         self, text: str, filename: str
@@ -1034,7 +1135,28 @@ Return ONLY valid JSON with these fields, nothing else.""",
                             f"✅ Processed {file.name} with GPT-5 direct PDF analysis"
                         )
                     else:
-                        st.error(f"❌ Failed to analyze {file.name}")
+                        # Fallback: Try text extraction method
+                        st.warning(
+                            f"⚠️ Direct PDF processing failed for {file.name}. "
+                            "Trying text extraction fallback..."
+                        )
+                        text = self.extract_text_from_pdf(file)
+                        if text:
+                            st.info(f"📄 Extracted text from {file.name}, analyzing...")
+                            expense_data = self.analyze_expense_with_gpt_fallback(
+                                text, file.name
+                            )
+                            if expense_data:
+                                processed_expenses.append(expense_data)
+                                st.success(
+                                    f"✅ Processed {file.name} with text extraction fallback"
+                                )
+                            else:
+                                st.error(
+                                    f"❌ Failed to analyze {file.name} even with text extraction"
+                                )
+                        else:
+                            st.error(f"❌ Could not extract text from {file.name}")
                 else:
                     # For images, use GPT-5 vision directly
                     st.info(f"🚀 Using GPT-5 vision for {file.name}")
@@ -1330,6 +1452,10 @@ if __name__ == "__main__":
         logger.info("App instance created, calling run()")
         app.run()
         logger.info("App run() completed")
+    except RerunException:
+        # RerunException is normal Streamlit behavior, not an error
+        # It's raised when st.rerun() is called to refresh the app
+        raise
     except Exception as e:
         logger.error(f"FATAL ERROR in main: {str(e)}")
         import traceback
