@@ -1,6 +1,5 @@
 import streamlit as st
 import pandas as pd
-import json
 import base64
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -15,6 +14,7 @@ import time
 from streamlit.runtime.scriptrunner.exceptions import RerunException
 import PyPDF2
 import io
+from pydantic import BaseModel
 
 # Configure logging
 logging.basicConfig(
@@ -31,6 +31,21 @@ st.set_page_config(
 )
 
 
+# Pydantic model for structured output from OpenAI
+class ExpenseExtraction(BaseModel):
+    """Schema for structured expense extraction from OpenAI"""
+
+    amount: float
+    currency: str
+    description: str
+    date: str
+    category: str
+    confidence: float
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
+
+
 @dataclass
 class ExpenseData:
     """Data structure for expense information"""
@@ -42,6 +57,9 @@ class ExpenseData:
     category: str
     filename: str
     confidence: float = 0.0
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
 
 
 # Constants
@@ -157,11 +175,13 @@ class ExpenseReportApp:
     def get_expense_analysis_prompt(self) -> str:
         """Get the standard expense analysis prompt for GPT"""
         return """Analyze this expense document and extract the following information in JSON format:
+
+REQUIRED FIELDS:
 1. amount: the total amount paid (as a number, no currency symbols)
 2. currency: the currency code (USD, EUR, CAD, etc.) - default to USD if unclear
-3. description: a brief description of what this expense is for
+3. description: a brief description of what this expense is for (e.g., "Flight from SFO to NYC", "Hotel stay in Boston")
 4. date: the transaction date in YYYY-MM-DD format. For hotels, use the first day of the stay
-5. category: categorize this into one of the following exact categories:
+5. category: categorize this into one of the following EXACT categories:
    - "AIRFARE"
    - "ACCOMMODATION (In US)"
    - "ACCOMMODATION (Outside US)"
@@ -174,8 +194,30 @@ class ExpenseReportApp:
    - "OTHER"
 6. confidence: a confidence score from 0.0 to 1.0 indicating how confident you are in the extraction
 
-Determine if this is in the US or not based on address, currency, or other indicators.
-Return ONLY valid JSON with these fields, nothing else."""
+CRITICAL - PERSONAL INFORMATION (extract if ANY name or email is present):
+7. first_name: Extract the first name from ANY of these locations:
+   - Passenger name, traveler name, guest name
+   - Cardholder name, account holder
+   - "Bill to", "Billed to", "Customer"
+   - "Name:", "Guest:", "Passenger:"
+   - Email sender or recipient name
+   - Any name on the receipt or invoice
+   - Name in email header "From:" or "To:"
+8. last_name: Extract the last name from the same locations
+9. email: Extract email address from ANY location including:
+   - Email headers (From:, To:, Reply-to:)
+   - Contact information sections
+   - Customer information
+   - Account details
+   - Any email address visible on the document
+
+IMPORTANT INSTRUCTIONS:
+- THOROUGHLY scan the ENTIRE document for names and email addresses
+- For email documents: Extract sender/recipient name and email from headers
+- For receipts: Look for customer name, cardholder, or guest information
+- Determine if this is in the US or not based on address, city, state, country, or currency indicators
+- If personal information is truly not found after thorough search, set those fields to null
+- Return ONLY valid JSON with these fields, nothing else. No explanations or markdown."""
 
     def analyze_expense_with_gpt_image(
         self, image_file, filename: str, max_retries: int = 3
@@ -201,9 +243,14 @@ Return ONLY valid JSON with these fields, nothing else."""
                 elif filename.lower().endswith(".webp"):
                     image_format = "webp"
 
-                response = client.chat.completions.create(
+                # Use structured outputs for reliable JSON extraction
+                response = client.beta.chat.completions.parse(
                     model="gpt-5",
                     messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an expert expense document analyzer. Extract information accurately from receipts, invoices, and expense documents.",
+                        },
                         {
                             "role": "user",
                             "content": [
@@ -218,14 +265,15 @@ Return ONLY valid JSON with these fields, nothing else."""
                                     },
                                 },
                             ],
-                        }
+                        },
                     ],
-                    max_completion_tokens=1024,
+                    response_format=ExpenseExtraction,
                 )
 
-                content = response.choices[0].message.content
+                # Get the parsed structured output
+                extracted_data = response.choices[0].message.parsed
 
-                if not content:
+                if not extracted_data:
                     if attempt < max_retries - 1:
                         st.warning(
                             f"Empty response from GPT-5 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
@@ -238,48 +286,32 @@ Return ONLY valid JSON with these fields, nothing else."""
                         )
                         return None
 
-                content = content.strip()
-
-                # Handle markdown code blocks
-                if content.startswith("```json"):
-                    content = content[7:]
-                elif content.startswith("```"):
-                    content = content[3:]
-
-                if content.endswith("```"):
-                    content = content[:-3]
-
-                content = content.strip()
-
-                # Try to find JSON in the response if it's not pure JSON
-                if not content.startswith("{"):
-                    start_idx = content.find("{")
-                    end_idx = content.rfind("}") + 1
-                    if start_idx != -1 and end_idx > start_idx:
-                        content = content[start_idx:end_idx]
-                    else:
-                        if attempt < max_retries - 1:
-                            st.warning(
-                                f"Invalid JSON response for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
-                            )
-                            time.sleep(2)
-                            continue
-                        else:
-                            st.error(
-                                f"No JSON object found in image response: {content[:200]}"
-                            )
-                            return None
-
-                data = json.loads(content)
+                # Log extracted personal information
+                if (
+                    extracted_data.first_name
+                    or extracted_data.last_name
+                    or extracted_data.email
+                ):
+                    logger.info(
+                        f"✅ Extracted personal info from {filename}: "
+                        f"first_name={extracted_data.first_name}, "
+                        f"last_name={extracted_data.last_name}, "
+                        f"email={extracted_data.email}"
+                    )
+                else:
+                    logger.warning(f"⚠️ No personal info extracted from {filename}")
 
                 return ExpenseData(
                     filename=filename,
-                    description=data.get("description") or "Unknown expense",
-                    amount=float(data.get("amount") or 0),
-                    currency=data.get("currency") or "USD",
-                    date=data.get("date") or datetime.now().strftime("%Y-%m-%d"),
-                    category=data.get("category") or "Other",
-                    confidence=float(data.get("confidence") or 0),
+                    description=extracted_data.description or "Unknown expense",
+                    amount=float(extracted_data.amount or 0),
+                    currency=extracted_data.currency or "USD",
+                    date=extracted_data.date or datetime.now().strftime("%Y-%m-%d"),
+                    category=extracted_data.category or "OTHER",
+                    confidence=float(extracted_data.confidence or 0),
+                    first_name=extracted_data.first_name,
+                    last_name=extracted_data.last_name,
+                    email=extracted_data.email,
                 )
 
             except Exception as e:
@@ -311,13 +343,13 @@ Return ONLY valid JSON with these fields, nothing else."""
                 pdf_file.seek(0)  # Reset file pointer
                 uploaded_file = client.files.create(file=pdf_file, purpose="user_data")
 
-                # Create chat completion with direct PDF input using GPT-5
-                response = client.chat.completions.create(
+                # Use structured outputs for reliable JSON extraction
+                response = client.beta.chat.completions.parse(
                     model="gpt-5",
                     messages=[
                         {
                             "role": "system",
-                            "content": "You are an expert expense document analyzer. Analyze the PDF and return ONLY valid JSON with the specified fields.",
+                            "content": "You are an expert expense document analyzer. Extract information accurately from receipts, invoices, and expense documents.",
                         },
                         {
                             "role": "user",
@@ -328,34 +360,15 @@ Return ONLY valid JSON with these fields, nothing else."""
                                 },
                                 {
                                     "type": "text",
-                                    "text": """Analyze this expense document and extract the following information in JSON format:
-1. amount: the total amount paid (as a number, no currency symbols)
-2. currency: the currency code (USD, EUR, CAD, etc.) - default to USD if unclear
-3. description: a brief description of what this expense is for
-4. date: the transaction date in YYYY-MM-DD format. For hotels, use the first day of the stay
-5. category: categorize this into one of the following exact categories:
-   - "AIRFARE"
-   - "ACCOMMODATION (In US)"
-   - "ACCOMMODATION (Outside US)"
-   - "RAILWAY/BUS/TAXI (In US)"
-   - "RAILWAY/BUS/TAXI (Outside US)"
-   - "CAR RENTAL (In US)"
-   - "CAR RENTAL (Outside US)"
-   - "MEALS (In US)"
-   - "MEALS (Outside US)"
-   - "OTHER"
-6. confidence: a confidence score from 0.0 to 1.0 indicating how confident you are in the extraction
-
-Determine if this is in the US or not based on address, currency, or other indicators.
-Return ONLY valid JSON with these fields, nothing else.""",
+                                    "text": self.get_expense_analysis_prompt(),
                                 },
                             ],
                         },
                     ],
-                    max_completion_tokens=1024,
+                    response_format=ExpenseExtraction,
                 )
 
-                result_text = response.choices[0].message.content
+                extracted_data = response.choices[0].message.parsed
 
                 # Clean up the uploaded file
                 try:
@@ -363,79 +376,46 @@ Return ONLY valid JSON with these fields, nothing else.""",
                 except Exception:
                     pass  # File cleanup failed, but continue
 
-                # Parse the JSON response
-                try:
-                    if not result_text:
-                        if attempt < max_retries - 1:
-                            st.warning(
-                                f"Empty response from GPT-5 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
-                            )
-                            time.sleep(2)  # Wait 2 seconds before retrying
-                            continue
-                        else:
-                            st.error(
-                                f"Empty response from GPT-5 after {max_retries} attempts"
-                            )
-                            return None
-
-                    result_text = result_text.strip()
-
-                    # Handle markdown code blocks
-                    if result_text.startswith("```json"):
-                        result_text = result_text[7:]
-                    elif result_text.startswith("```"):
-                        result_text = result_text[3:]
-
-                    if result_text.endswith("```"):
-                        result_text = result_text[:-3]
-
-                    result_text = result_text.strip()
-
-                    # Try to find JSON in the response if it's not pure JSON
-                    if not result_text.startswith("{"):
-                        # Look for JSON object in the text
-                        start_idx = result_text.find("{")
-                        end_idx = result_text.rfind("}") + 1
-                        if start_idx != -1 and end_idx > start_idx:
-                            result_text = result_text[start_idx:end_idx]
-                        else:
-                            if attempt < max_retries - 1:
-                                st.warning(
-                                    f"Invalid JSON response for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
-                                )
-                                time.sleep(2)
-                                continue
-                            else:
-                                st.error(
-                                    f"No JSON object found in response: {result_text[:200]}"
-                                )
-                                return None
-
-                    data = json.loads(result_text)
-
-                    return ExpenseData(
-                        amount=float(data.get("amount", 0) or 0),
-                        currency=data.get("currency", "USD") or "USD",
-                        description=data.get("description", "Unknown expense")
-                        or "Unknown expense",
-                        date=data.get("date", datetime.now().strftime("%Y-%m-%d"))
-                        or datetime.now().strftime("%Y-%m-%d"),
-                        category=data.get("category", "OTHER") or "OTHER",
-                        filename=filename,
-                        confidence=float(data.get("confidence", 0.5) or 0.5),
-                    )
-
-                except json.JSONDecodeError as e:
+                if not extracted_data:
                     if attempt < max_retries - 1:
                         st.warning(
-                            f"Failed to parse JSON for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
+                            f"Empty response from GPT-5 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
                         )
                         time.sleep(2)
                         continue
                     else:
-                        st.error(f"Failed to parse GPT response as JSON: {str(e)}")
-                        st.error(f"Response was: {result_text}")
+                        st.error(
+                            f"Empty response from GPT-5 after {max_retries} attempts"
+                        )
                         return None
+
+                # Log extracted personal information
+                if (
+                    extracted_data.first_name
+                    or extracted_data.last_name
+                    or extracted_data.email
+                ):
+                    logger.info(
+                        f"✅ Extracted personal info from {filename}: "
+                        f"first_name={extracted_data.first_name}, "
+                        f"last_name={extracted_data.last_name}, "
+                        f"email={extracted_data.email}"
+                    )
+                else:
+                    logger.warning(f"⚠️ No personal info extracted from {filename}")
+
+                return ExpenseData(
+                    amount=float(extracted_data.amount or 0),
+                    currency=extracted_data.currency or "USD",
+                    description=extracted_data.description or "Unknown expense",
+                    date=extracted_data.date or datetime.now().strftime("%Y-%m-%d"),
+                    category=extracted_data.category or "OTHER",
+                    filename=filename,
+                    confidence=float(extracted_data.confidence or 0.5),
+                    first_name=extracted_data.first_name,
+                    last_name=extracted_data.last_name,
+                    email=extracted_data.email,
+                )
 
             except Exception as e:
                 if attempt < max_retries - 1:
@@ -460,102 +440,61 @@ Return ONLY valid JSON with these fields, nothing else.""",
         if not client:
             return None
 
-        prompt = f"""
-        You are an expert at parsing and analyzing receipts and expense documents.
+        prompt = f"""{self.get_expense_analysis_prompt()}
 
-        Analyze this expense document text and extract the following information in JSON format:
-        1. amount: the total amount paid (as a number, no currency symbols)
-        2. currency: the currency code (USD, EUR, CAD, etc.) - default to USD if unclear
-        3. description: a brief description of what this expense is for
-        4. date: the transaction date in YYYY-MM-DD format. For hotels, use the first day of the stay
-        5. category: categorize this into one of the following exact categories:
-           - "AIRFARE"
-           - "ACCOMMODATION (In US)"
-           - "ACCOMMODATION (Outside US)"
-           - "RAILWAY/BUS/TAXI (In US)"
-           - "RAILWAY/BUS/TAXI (Outside US)"
-           - "CAR RENTAL (In US)"
-           - "CAR RENTAL (Outside US)"
-           - "MEALS (In US)"
-           - "MEALS (Outside US)"
-           - "OTHER"
-        6. confidence: a confidence score from 0.0 to 1.0 indicating how confident you are in the extraction
-
-        Determine if this is in the US or not based on address, currency, or other indicators.
-
-        Document text:
-        {text}
-
-        Return ONLY valid JSON with these fields, nothing else.
-        """
+Document text:
+{text}"""
 
         try:
-            response = client.chat.completions.create(
-                model="gpt-5",  # Use latest GPT-5 model
+            response = client.beta.chat.completions.parse(
+                model="gpt-5",
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a precise expense document analyzer. Always return valid JSON.",
+                        "content": "You are an expert expense document analyzer. Extract information accurately from receipts, invoices, and expense documents.",
                     },
                     {"role": "user", "content": prompt},
                 ],
-                max_completion_tokens=1024,
+                response_format=ExpenseExtraction,
             )
 
-            result_text = response.choices[0].message.content
+            extracted_data = response.choices[0].message.parsed
 
-            # Try to extract JSON from the response
-            try:
-                if not result_text:
-                    st.error("Empty response from GPT-5")
-                    return None
-
-                result_text = result_text.strip()
-
-                # Remove any markdown formatting
-                if result_text.startswith("```json"):
-                    result_text = result_text[7:]
-                elif result_text.startswith("```"):
-                    result_text = result_text[3:]
-
-                if result_text.endswith("```"):
-                    result_text = result_text[:-3]
-
-                result_text = result_text.strip()
-
-                # Try to find JSON in the response if it's not pure JSON
-                if not result_text.startswith("{"):
-                    start_idx = result_text.find("{")
-                    end_idx = result_text.rfind("}") + 1
-                    if start_idx != -1 and end_idx > start_idx:
-                        result_text = result_text[start_idx:end_idx]
-                    else:
-                        st.error(
-                            f"No JSON object found in response: {result_text[:200]}"
-                        )
-                        return None
-
-                data = json.loads(result_text)
-
-                return ExpenseData(
-                    amount=float(data.get("amount", 0) or 0),
-                    currency=data.get("currency", "USD") or "USD",
-                    description=data.get("description", "Unknown expense")
-                    or "Unknown expense",
-                    date=data.get("date", datetime.now().strftime("%Y-%m-%d"))
-                    or datetime.now().strftime("%Y-%m-%d"),
-                    category=data.get("category", "OTHER") or "OTHER",
-                    filename=filename,
-                    confidence=float(data.get("confidence", 0.5) or 0.5),
-                )
-
-            except json.JSONDecodeError as e:
-                st.error(f"Failed to parse GPT response as JSON: {str(e)}")
-                st.error(f"Response was: {result_text}")
+            if not extracted_data:
+                st.error("Empty response from GPT-5")
                 return None
+
+            # Log extracted personal information
+            if (
+                extracted_data.first_name
+                or extracted_data.last_name
+                or extracted_data.email
+            ):
+                logger.info(
+                    f"✅ Extracted personal info from {filename}: "
+                    f"first_name={extracted_data.first_name}, "
+                    f"last_name={extracted_data.last_name}, "
+                    f"email={extracted_data.email}"
+                )
+            else:
+                logger.warning(f"⚠️ No personal info extracted from {filename}")
+
+            return ExpenseData(
+                amount=float(extracted_data.amount or 0),
+                currency=extracted_data.currency or "USD",
+                description=extracted_data.description or "Unknown expense",
+                date=extracted_data.date or datetime.now().strftime("%Y-%m-%d"),
+                category=extracted_data.category or "OTHER",
+                filename=filename,
+                confidence=float(extracted_data.confidence or 0.5),
+                first_name=extracted_data.first_name,
+                last_name=extracted_data.last_name,
+                email=extracted_data.email,
+            )
 
         except Exception as e:
             st.error(f"Error calling OpenAI API: {str(e)}")
+            logger.error(f"Error in fallback processing: {str(e)}")
             return None
 
     def get_exchange_rates(self, currencies: List[str], date: str) -> Dict[str, float]:
@@ -583,9 +522,6 @@ Return ONLY valid JSON with these fields, nothing else.""",
         if not expenses:
             return
 
-        # Extract common patterns from expense descriptions
-        descriptions = [exp.description for exp in expenses if exp.description]
-
         # Generate event name from common patterns
         event_name = self.generate_event_name_from_expenses(expenses)
 
@@ -605,14 +541,27 @@ Return ONLY valid JSON with these fields, nothing else.""",
 
         # Auto-prefill metadata if not already set
         if not st.session_state.metadata:
-            # Try to extract name and email from documents
-            extracted_name = self.extract_name_from_expenses(expenses)
-            extracted_email = self.extract_email_from_expenses(expenses)
+            # Extract name and email from GPT-extracted data
+            first_name = ""
+            last_name = ""
+            email = ""
+
+            # Find the first expense with valid personal information
+            for exp in expenses:
+                if exp.first_name and not first_name:
+                    first_name = exp.first_name
+                if exp.last_name and not last_name:
+                    last_name = exp.last_name
+                if exp.email and not email:
+                    email = exp.email
+                # Break early if we have all three
+                if first_name and last_name and email:
+                    break
 
             st.session_state.metadata = {
-                "first_name": extracted_name.get("first_name", ""),
-                "last_name": extracted_name.get("last_name", ""),
-                "email": extracted_email,
+                "first_name": first_name,
+                "last_name": last_name,
+                "email": email,
                 "event_name": event_name,
                 "description": business_purpose,
                 "start_date": start_date,
@@ -625,6 +574,25 @@ Return ONLY valid JSON with these fields, nothing else.""",
             }
         else:
             # Update existing metadata with extracted info
+            # Extract personal information from expenses if not already set
+            if not st.session_state.metadata.get("first_name"):
+                for exp in expenses:
+                    if exp.first_name:
+                        st.session_state.metadata["first_name"] = exp.first_name
+                        break
+
+            if not st.session_state.metadata.get("last_name"):
+                for exp in expenses:
+                    if exp.last_name:
+                        st.session_state.metadata["last_name"] = exp.last_name
+                        break
+
+            if not st.session_state.metadata.get("email"):
+                for exp in expenses:
+                    if exp.email:
+                        st.session_state.metadata["email"] = exp.email
+                        break
+
             if not st.session_state.metadata.get("event_name"):
                 st.session_state.metadata["event_name"] = event_name
             if not st.session_state.metadata.get("description"):
@@ -970,20 +938,6 @@ Return ONLY valid JSON with these fields, nothing else.""",
                 f"✅ {len(st.session_state.expenses)} expense(s) already processed! Event details have been auto-prefilled from your documents."
             )
 
-            # Show auto-generated form link
-            if st.session_state.metadata:
-                prefill_url = self.generate_google_form_prefill_url(
-                    st.session_state.expenses, st.session_state.metadata
-                )
-                st.markdown("---")
-                st.success("🎉 **Your FSU Form is Ready!**")
-                st.markdown(
-                    f"**[🔗 Click here to open your prefilled FSU Travel & Entertainment Form]({prefill_url})**"
-                )
-                st.info(
-                    "📋 The form has been automatically prefilled with your expense data. Review and submit!"
-                )
-
         with st.form("metadata_form"):
             col1, col2 = st.columns(2)
 
@@ -1090,22 +1044,8 @@ Return ONLY valid JSON with these fields, nothing else.""",
             st.markdown("---")
             st.markdown("### 📝 **Complete Your Event Information**")
             st.info(
-                "💡 **Personal details** (name, email) need to be filled manually. **Event details** have been auto-prefilled from your documents!"
+                "💡 **Personal details** (name, email) and **Event details** should be auto-extracted from your documents. Please verify and update if needed!"
             )
-
-            # Show FSU form link if metadata exists
-            if st.session_state.metadata:
-                prefill_url = self.generate_google_form_prefill_url(
-                    st.session_state.expenses, st.session_state.metadata
-                )
-                st.markdown("---")
-                st.success("🎉 **Your FSU Form is Ready!**")
-                st.markdown(
-                    f"**[🔗 Click here to open your prefilled FSU Travel & Entertainment Form]({prefill_url})**"
-                )
-                st.info(
-                    "📋 The form has been automatically prefilled with your expense data. Review and submit!"
-                )
 
             # Render the inline event form
             self.render_inline_event_form()
@@ -1131,9 +1071,25 @@ Return ONLY valid JSON with these fields, nothing else.""",
                     )
                     if expense_data:
                         processed_expenses.append(expense_data)
-                        st.success(
+                        success_msg = (
                             f"✅ Processed {file.name} with GPT-5 direct PDF analysis"
                         )
+                        # Show extracted personal info
+                        if (
+                            expense_data.first_name
+                            or expense_data.last_name
+                            or expense_data.email
+                        ):
+                            personal_parts = []
+                            if expense_data.first_name or expense_data.last_name:
+                                name = f"{expense_data.first_name or ''} {expense_data.last_name or ''}".strip()
+                                personal_parts.append(f"Name: {name}")
+                            if expense_data.email:
+                                personal_parts.append(f"Email: {expense_data.email}")
+                            success_msg += (
+                                f" | 📋 Extracted: {', '.join(personal_parts)}"
+                            )
+                        st.success(success_msg)
                     else:
                         # Fallback: Try text extraction method
                         st.warning(
@@ -1148,9 +1104,28 @@ Return ONLY valid JSON with these fields, nothing else.""",
                             )
                             if expense_data:
                                 processed_expenses.append(expense_data)
-                                st.success(
-                                    f"✅ Processed {file.name} with text extraction fallback"
-                                )
+                                success_msg = f"✅ Processed {file.name} with text extraction fallback"
+                                # Show extracted personal info
+                                if (
+                                    expense_data.first_name
+                                    or expense_data.last_name
+                                    or expense_data.email
+                                ):
+                                    personal_parts = []
+                                    if (
+                                        expense_data.first_name
+                                        or expense_data.last_name
+                                    ):
+                                        name = f"{expense_data.first_name or ''} {expense_data.last_name or ''}".strip()
+                                        personal_parts.append(f"Name: {name}")
+                                    if expense_data.email:
+                                        personal_parts.append(
+                                            f"Email: {expense_data.email}"
+                                        )
+                                    success_msg += (
+                                        f" | 📋 Extracted: {', '.join(personal_parts)}"
+                                    )
+                                st.success(success_msg)
                             else:
                                 st.error(
                                     f"❌ Failed to analyze {file.name} even with text extraction"
@@ -1163,7 +1138,23 @@ Return ONLY valid JSON with these fields, nothing else.""",
                     expense_data = self.analyze_expense_with_gpt_image(file, file.name)
                     if expense_data:
                         processed_expenses.append(expense_data)
-                        st.success(f"✅ Processed {file.name} with GPT-5 vision")
+                        success_msg = f"✅ Processed {file.name} with GPT-5 vision"
+                        # Show extracted personal info
+                        if (
+                            expense_data.first_name
+                            or expense_data.last_name
+                            or expense_data.email
+                        ):
+                            personal_parts = []
+                            if expense_data.first_name or expense_data.last_name:
+                                name = f"{expense_data.first_name or ''} {expense_data.last_name or ''}".strip()
+                                personal_parts.append(f"Name: {name}")
+                            if expense_data.email:
+                                personal_parts.append(f"Email: {expense_data.email}")
+                            success_msg += (
+                                f" | 📋 Extracted: {', '.join(personal_parts)}"
+                            )
+                        st.success(success_msg)
                     else:
                         st.error(f"❌ Failed to analyze {file.name}")
 
@@ -1182,6 +1173,22 @@ Return ONLY valid JSON with these fields, nothing else.""",
 
             # Auto-prefill event information from extracted data
             self.auto_prefill_event_info(processed_expenses)
+
+            # Show what personal information was extracted
+            extracted_info = []
+            if st.session_state.metadata.get("first_name"):
+                extracted_info.append(
+                    f"👤 Name: {st.session_state.metadata['first_name']} "
+                    f"{st.session_state.metadata.get('last_name', '')}"
+                )
+            if st.session_state.metadata.get("email"):
+                extracted_info.append(f"📧 Email: {st.session_state.metadata['email']}")
+
+            if extracted_info:
+                st.info(
+                    "🎯 **Auto-extracted personal information:**\n"
+                    + "\n".join(f"- {info}" for info in extracted_info)
+                )
 
             # Set flag to show Event Info content prominently
             st.session_state.show_event_info = True
