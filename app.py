@@ -24,10 +24,103 @@ logger = logging.getLogger(__name__)
 
 # Configure page
 st.set_page_config(
-    page_title="AI Expense Report Generator",
-    page_icon="📄",
+    page_title="Haas Expense Report Automation",
+    page_icon="🐻",
     layout="wide",
     initial_sidebar_state="expanded",
+)
+
+# Add Haas UC Berkeley branding with custom CSS
+st.markdown(
+    """
+<style>
+    /* Berkeley Blue and California Gold colors */
+    :root {
+        --berkeley-blue: #003262;
+        --california-gold: #FDB515;
+        --founders-rock: #3B7EA1;
+        --pacific-blue: #46535E;
+    }
+    
+    /* Header styling */
+    .main-header {
+        background: linear-gradient(135deg, var(--berkeley-blue) 0%, var(--founders-rock) 100%);
+        padding: 2rem;
+        border-radius: 10px;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+    
+    .main-title {
+        color: white;
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin: 0;
+        text-align: center;
+    }
+    
+    .haas-subtitle {
+        color: var(--california-gold);
+        font-size: 1.2rem;
+        text-align: center;
+        margin-top: 0.5rem;
+        font-weight: 500;
+    }
+    
+    /* Button styling */
+    .stButton>button {
+        background-color: var(--berkeley-blue);
+        color: white;
+        border: 2px solid var(--california-gold);
+        font-weight: 600;
+    }
+    
+    .stButton>button:hover {
+        background-color: var(--founders-rock);
+        border-color: var(--california-gold);
+    }
+    
+    /* Tab styling */
+    .stTabs [data-baseweb="tab-list"] {
+        gap: 8px;
+    }
+    
+    .stTabs [data-baseweb="tab"] {
+        background-color: var(--berkeley-blue);
+        color: white;
+        border-radius: 5px 5px 0 0;
+        padding: 10px 20px;
+        font-weight: 600;
+    }
+    
+    .stTabs [aria-selected="true"] {
+        background-color: var(--california-gold);
+        color: var(--berkeley-blue);
+    }
+    
+    /* Sidebar styling */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, var(--berkeley-blue) 0%, var(--pacific-blue) 100%);
+    }
+    
+    [data-testid="stSidebar"] * {
+        color: white !important;
+    }
+    
+    /* Success/Info boxes */
+    .stSuccess {
+        background-color: rgba(253, 181, 21, 0.1);
+        border-left: 5px solid var(--california-gold);
+    }
+    
+    /* Metrics */
+    [data-testid="stMetricValue"] {
+        color: var(--berkeley-blue);
+        font-weight: 700;
+    }
+</style>
+""",
+    unsafe_allow_html=True,
 )
 
 
@@ -799,50 +892,6 @@ Document text:
                 else:
                     st.error("Please fill in all required fields (marked with *)")
 
-    def generate_google_form_prefill_url(
-        self, expenses: List[ExpenseData], metadata: Dict
-    ) -> str:
-        """Generate a prefilled Google Form URL for FSU Travel and Entertainment Request"""
-        base_url = "https://docs.google.com/forms/d/e/1FAIpQLScmcTFMDnAxU8FKQyns4BVJDFOa35-B4sCD1VzUFpWvdXfedw/viewform"
-
-        # Calculate total estimated amount
-        total_amount = sum(exp.amount for exp in expenses)
-
-        # Generate business purpose from expense descriptions
-        business_purpose = f"Business expenses including: {', '.join(set(exp.description[:50] for exp in expenses[:3]))}"
-        if len(expenses) > 3:
-            business_purpose += f" and {len(expenses) - 3} other expenses"
-
-        # Determine reimbursement type based on expense categories
-        has_travel = any(
-            "AIRFARE" in exp.category or "ACCOMMODATION" in exp.category
-            for exp in expenses
-        )
-        reimbursement_type = "Travel" if has_travel else "Entertainment"
-
-        # Get the latest expense date
-        latest_date = max(datetime.strptime(exp.date, "%Y-%m-%d") for exp in expenses)
-
-        # URL parameters for form prefilling (these are example field IDs - you'll need to inspect the actual form)
-        # Note: You'll need to inspect the Google Form HTML to get the actual field entry IDs
-        params = {
-            # These are placeholder field IDs - replace with actual form field IDs
-            "entry.123456789": reimbursement_type,  # Reimbursement Type
-            "entry.987654321": latest_date.strftime(
-                "%m/%d/%Y"
-            ),  # Last date of business travel
-            "entry.456789123": metadata.get("event_name", ""),  # Academic Group/Event
-            "entry.789123456": f"{metadata.get('first_name', '')} {metadata.get('last_name', '')}",  # Faculty name
-            "entry.321654987": business_purpose,  # Business Purpose
-            "entry.654987321": f"${total_amount:.2f}",  # Estimated amount
-        }
-
-        # URL encode the parameters
-        query_string = urllib.parse.urlencode(params)
-        prefill_url = f"{base_url}?{query_string}"
-
-        return prefill_url
-
     def submit_to_google_sheets(
         self, expenses: List[ExpenseData], metadata: Dict
     ) -> bool:
@@ -894,6 +943,18 @@ Document text:
     def render_sidebar(self):
         """Render the sidebar with configuration options"""
         logger.info("Rendering sidebar")
+
+        # Haas branded sidebar header
+        st.sidebar.markdown(
+            """
+        <div style="text-align: center; padding: 1rem 0; border-bottom: 3px solid #FDB515; margin-bottom: 1rem;">
+            <h2 style="color: #FDB515; margin: 0; font-size: 1.5rem;">🐻 Haas FSU</h2>
+            <p style="color: #FDB515; font-size: 0.9rem; margin: 0.3rem 0 0 0;">Expense Automation</p>
+        </div>
+        """,
+            unsafe_allow_html=True,
+        )
+
         st.sidebar.title("🔧 Configuration")
 
         # API Status
@@ -926,7 +987,9 @@ Document text:
             st.session_state.expenses = []
             st.session_state.metadata = {}
             st.session_state.processing_complete = False
-            st.rerun()
+            st.session_state.show_event_info = False
+            st.session_state.show_review_next = False
+            # Streamlit will automatically rerun after state changes
 
     def render_metadata_form(self):
         """Render the metadata collection form"""
@@ -1012,7 +1075,7 @@ Document text:
                     }
 
                     st.success("✅ Event information saved!")
-                    st.rerun()
+                    # Streamlit will automatically rerun after form submission
                 else:
                     st.error("Please fill in all required fields (marked with *)")
 
@@ -1193,8 +1256,7 @@ Document text:
             # Set flag to show Event Info content prominently
             st.session_state.show_event_info = True
 
-            # The inline form will be shown in the file upload section
-            st.rerun()
+            # Streamlit will automatically rerun and show the inline form
 
     def render_expense_review(self):
         """Render the expense review and editing interface"""
@@ -1363,42 +1425,27 @@ Document text:
 
         # Submission options
         st.markdown("---")
-        st.subheader("📤 Submission Options")
+        st.subheader("📤 Submit to Google Sheets")
 
-        col1, col2 = st.columns(2)
+        st.markdown(
+            "Export your expense data to Google Sheets for record keeping and further processing."
+        )
 
-        with col1:
-            st.markdown("**🏫 FSU Travel & Entertainment Form**")
-            if st.button(
-                "🔗 Open Prefilled FSU Form", type="secondary", use_container_width=True
-            ):
-                prefill_url = self.generate_google_form_prefill_url(
+        if st.button(
+            "📤 Submit to Google Sheets", type="primary", use_container_width=True
+        ):
+            with st.spinner("Submitting data..."):
+                success = self.submit_to_google_sheets(
                     st.session_state.expenses, st.session_state.metadata
                 )
-                st.markdown(
-                    f"[Click here to open the prefilled FSU form]({prefill_url})"
-                )
-                st.info(
-                    "📋 The form has been prefilled with your expense data. You may need to adjust field mappings and add additional required information."
-                )
 
-        with col2:
-            st.markdown("**📊 Google Sheets Backup**")
-            if st.button(
-                "📤 Submit to Google Sheets", type="primary", use_container_width=True
-            ):
-                with st.spinner("Submitting data..."):
-                    success = self.submit_to_google_sheets(
-                        st.session_state.expenses, st.session_state.metadata
+                if success:
+                    st.success("✅ Data successfully submitted to Google Sheets!")
+                    st.balloons()
+                else:
+                    st.error(
+                        "❌ Failed to submit data. Please check your configuration."
                     )
-
-                    if success:
-                        st.success("✅ Data successfully submitted to Google Sheets!")
-                        st.balloons()
-                    else:
-                        st.error(
-                            "❌ Failed to submit data. Please check your configuration."
-                        )
 
         # Start over option
         st.markdown("---")
@@ -1406,16 +1453,30 @@ Document text:
             st.session_state.expenses = []
             st.session_state.metadata = {}
             st.session_state.processing_complete = False
-            st.rerun()
+            st.session_state.show_event_info = False
+            st.session_state.show_review_next = False
+            # Streamlit will automatically rerun after state changes
 
     def run(self):
         """Main application runner"""
         logger.info("Starting main run method")
         try:
             logger.info("Setting title and markdown")
-            st.title("🤖 AI-Powered Expense Report Generator (GPT-5)")
+
+            # Haas branded header
             st.markdown(
-                "Upload your expense documents and let GPT-5 extract and categorize the information automatically with enhanced accuracy and speed!"
+                """
+            <div class="main-header">
+                <h1 class="main-title">🐻 Haas Expense Report Automation</h1>
+                <p class="haas-subtitle">UC Berkeley Haas School of Business | AI-Powered with GPT-5</p>
+            </div>
+            """,
+                unsafe_allow_html=True,
+            )
+
+            st.markdown(
+                "**Upload your expense documents and let AI extract and categorize the information automatically.** "
+                "Perfect for faculty, staff, and researchers managing travel and business expenses."
             )
 
             # Render sidebar
