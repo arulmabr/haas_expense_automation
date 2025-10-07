@@ -895,7 +895,7 @@ Document text:
     def submit_to_google_sheets(
         self, expenses: List[ExpenseData], metadata: Dict
     ) -> bool:
-        """Submit data to Google Sheets"""
+        """Submit data to Google Sheets - individual expenses and summary"""
         client = self.get_google_sheets_client()
         if not client:
             return False
@@ -907,9 +907,78 @@ Document text:
                 st.error("Google Sheet ID not configured")
                 return False
 
-            sheet = client.open_by_key(sheet_id).sheet1
+            spreadsheet = client.open_by_key(sheet_id)
 
-            # Prepare data for submission
+            # Calculate totals first
+            total_amount_usd = 0
+            category_totals = {}
+
+            for expense in expenses:
+                exchange_rate = metadata.get("exchange_rates", {}).get(
+                    expense.currency, 1.0
+                )
+                amount_usd = expense.amount * exchange_rate
+                total_amount_usd += amount_usd
+
+                # Track category totals
+                category = expense.category
+                category_totals[category] = (
+                    category_totals.get(category, 0) + amount_usd
+                )
+
+            # Sheet1: Event summary (one row per event)
+            sheet1 = spreadsheet.sheet1
+
+            # Prepare category breakdown string
+            category_breakdown = ", ".join(
+                [f"{cat}: ${amt:.2f}" for cat, amt in category_totals.items()]
+            )
+
+            # Submit summary row to Sheet1
+            summary_row = [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Timestamp
+                metadata.get("event_name", ""),
+                metadata.get("first_name", ""),
+                metadata.get("last_name", ""),
+                metadata.get("email", ""),
+                metadata.get("start_date", ""),
+                metadata.get("end_date", ""),
+                metadata.get("description", ""),
+                round(total_amount_usd, 2),
+                len(expenses),
+                category_breakdown,
+                "USD",
+            ]
+
+            sheet1.append_row(summary_row)
+
+            # Details sheet: Individual expense details
+            try:
+                details_sheet = spreadsheet.worksheet("Details")
+            except Exception:
+                # Create Details sheet if it doesn't exist
+                details_sheet = spreadsheet.add_worksheet(
+                    title="Details", rows="10000", cols="20"
+                )
+                # Add headers
+                headers = [
+                    "Timestamp",
+                    "Event Name",
+                    "First Name",
+                    "Last Name",
+                    "Email",
+                    "Invoice Name",
+                    "Amount",
+                    "Currency",
+                    "Amount in USD",
+                    "Category",
+                    "Event Date",
+                    "Invoice Files",
+                    "Accuracy",
+                ]
+                details_sheet.append_row(headers)
+
+            # Submit individual expenses to Details sheet
             for expense in expenses:
                 exchange_rate = metadata.get("exchange_rates", {}).get(
                     expense.currency, 1.0
@@ -932,12 +1001,13 @@ Document text:
                     expense.confidence,
                 ]
 
-                sheet.append_row(row_data)
+                details_sheet.append_row(row_data)
 
             return True
 
         except Exception as e:
             st.error(f"Error submitting to Google Sheets: {str(e)}")
+            logger.error(f"Google Sheets error: {str(e)}")
             return False
 
     def render_sidebar(self):
@@ -1428,19 +1498,25 @@ Document text:
         st.subheader("📤 Submit to Google Sheets")
 
         st.markdown(
-            "Export your expense data to Google Sheets for record keeping and further processing."
+            """
+        Export your expense data to Google Sheets:
+        - **Sheet1**: Event totals (one row per event with aggregated data)
+        - **Details**: Individual invoice details (one row per expense)
+        """
         )
 
         if st.button(
             "📤 Submit to Google Sheets", type="primary", use_container_width=True
         ):
-            with st.spinner("Submitting data..."):
+            with st.spinner("Submitting to Sheet1 and Details sheet..."):
                 success = self.submit_to_google_sheets(
                     st.session_state.expenses, st.session_state.metadata
                 )
 
                 if success:
-                    st.success("✅ Data successfully submitted to Google Sheets!")
+                    st.success(
+                        "✅ Data successfully submitted to both Sheet1 and Details!"
+                    )
                     st.balloons()
                 else:
                     st.error(
