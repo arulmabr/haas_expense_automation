@@ -935,14 +935,23 @@ Document text:
             )
 
             # Submit summary row to Sheet1
+            # Convert dates to strings if they're date objects
+            start_date = metadata.get("start_date", "")
+            end_date = metadata.get("end_date", "")
+
+            if hasattr(start_date, "strftime"):
+                start_date = start_date.strftime("%Y-%m-%d")
+            if hasattr(end_date, "strftime"):
+                end_date = end_date.strftime("%Y-%m-%d")
+
             summary_row = [
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Timestamp
                 metadata.get("event_name", ""),
                 metadata.get("first_name", ""),
                 metadata.get("last_name", ""),
                 metadata.get("email", ""),
-                metadata.get("start_date", ""),
-                metadata.get("end_date", ""),
+                start_date,
+                end_date,
                 metadata.get("description", ""),
                 round(total_amount_usd, 2),
                 len(expenses),
