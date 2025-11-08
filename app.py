@@ -433,8 +433,24 @@ IMPORTANT INSTRUCTIONS:
         for attempt in range(max_retries):
             try:
                 # Upload the PDF file to OpenAI
+                # Read the file content and create a proper file object
                 pdf_file.seek(0)  # Reset file pointer
-                uploaded_file = client.files.create(file=pdf_file, purpose="user_data")
+                file_content = pdf_file.read()
+
+                # Validate file content
+                if not file_content or len(file_content) == 0:
+                    raise ValueError(f"File {filename} is empty or could not be read")
+
+                logger.info(f"Read {len(file_content)} bytes from {filename}")
+
+                # Create a BytesIO object with proper name attribute
+                file_obj = io.BytesIO(file_content)
+                file_obj.name = filename
+
+                uploaded_file = client.files.create(file=file_obj, purpose="user_data")
+                logger.info(
+                    f"Successfully uploaded {filename} to OpenAI (file_id: {uploaded_file.id})"
+                )
 
                 # Use structured outputs for reliable JSON extraction
                 response = client.beta.chat.completions.parse(
@@ -511,6 +527,9 @@ IMPORTANT INSTRUCTIONS:
                 )
 
             except Exception as e:
+                logger.error(
+                    f"Error processing {filename} (Attempt {attempt + 1}/{max_retries}): {str(e)}"
+                )
                 if attempt < max_retries - 1:
                     st.warning(
                         f"Error processing {filename}, retrying... (Attempt {attempt + 1}/{max_retries}): {str(e)}"
@@ -521,6 +540,7 @@ IMPORTANT INSTRUCTIONS:
                     st.error(
                         f"Error with direct PDF processing after {max_retries} attempts: {str(e)}"
                     )
+                    logger.error(f"Failed to process {filename} after all retries")
                     return None
 
         return None  # All retries exhausted
@@ -1207,6 +1227,20 @@ Document text:
             try:
                 # Use GPT-5 direct processing for both PDFs and images
                 if file.type == "application/pdf":
+                    # Check file size before processing
+                    file.seek(0)
+                    file_content = file.read()
+                    file.seek(0)  # Reset for processing
+
+                    if len(file_content) == 0:
+                        st.error(
+                            f"❌ {file.name} is empty. Please check the file and try again."
+                        )
+                        continue
+
+                    logger.info(
+                        f"Processing PDF {file.name} ({len(file_content)} bytes)"
+                    )
                     st.info(f"🚀 Using GPT-5 direct PDF processing for {file.name}")
                     expense_data = self.analyze_expense_with_gpt_direct_pdf(
                         file, file.name
