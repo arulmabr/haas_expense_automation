@@ -8,13 +8,25 @@ from google.oauth2.service_account import Credentials
 import openai
 import os
 from dataclasses import dataclass
-import urllib.parse
 import logging
 import time
-from streamlit.runtime.scriptrunner.exceptions import RerunException
 import PyPDF2
 import io
 from pydantic import BaseModel
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+# Handle different Streamlit versions
+try:
+    from streamlit.runtime.scriptrunner.script_runner import RerunException
+    from streamlit.runtime.scriptrunner.exceptions import StopException
+except ImportError:
+    try:
+        from streamlit.script_runner import RerunException
+        StopException = None
+    except ImportError:
+        # For newer Streamlit versions, RerunException may not be needed
+        RerunException = None
+        StopException = None
 
 # Configure logging
 logging.basicConfig(
@@ -199,7 +211,34 @@ class ExpenseReportApp:
             st.session_state.metadata = {}
         if "processing_complete" not in st.session_state:
             st.session_state.processing_complete = False
+        if "additional_context" not in st.session_state:
+            st.session_state.additional_context = ""
+        if "include_external_emails" not in st.session_state:
+            st.session_state.include_external_emails = False
+        if "use_ai_business_purpose" not in st.session_state:
+            st.session_state.use_ai_business_purpose = False
         logger.info("Session state setup complete")
+
+    def is_valid_email(self, email: str, allow_external: bool = False) -> bool:
+        """
+        Validate email domain based on Berkeley policy.
+
+        Args:
+            email: Email address to validate
+            allow_external: If True, allows non-Berkeley emails (for external guests)
+
+        Returns:
+            True if email is valid according to policy, False otherwise
+        """
+        if not email:
+            return False
+
+        # Always allow Berkeley emails
+        if email.lower().endswith("@berkeley.edu"):
+            return True
+
+        # Allow non-Berkeley emails only if external guests flag is set
+        return allow_external
 
     def get_openai_client(self):
         """Initialize OpenAI client"""
@@ -265,9 +304,9 @@ class ExpenseReportApp:
             logger.error(f"Failed to extract text from PDF: {str(e)}")
             return None
 
-    def get_expense_analysis_prompt(self) -> str:
+    def get_expense_analysis_prompt(self, context: str = "") -> str:
         """Get the standard expense analysis prompt for GPT"""
-        return """Analyze this expense document and extract the following information in JSON format:
+        base_prompt = """Analyze this expense document and extract the following information in JSON format:
 
 REQUIRED FIELDS:
 1. amount: the total amount paid (as a number, no currency symbols)
@@ -312,8 +351,14 @@ IMPORTANT INSTRUCTIONS:
 - If personal information is truly not found after thorough search, set those fields to null
 - Return ONLY valid JSON with these fields, nothing else. No explanations or markdown."""
 
+        if context and context.strip():
+            context_addition = f"\n\nADDITIONAL CONTEXT PROVIDED BY USER:\n{context.strip()}\n\nUse this context to better understand the purpose and nature of the expenses, but still extract the specific details from the document itself."
+            return base_prompt + context_addition
+
+        return base_prompt
+
     def analyze_expense_with_gpt_image(
-        self, image_file, filename: str, max_retries: int = 3
+        self, image_file, filename: str, context: str = "", max_retries: int = 3
     ) -> Optional[ExpenseData]:
         """Analyze expense image directly using GPT-5 vision API"""
         client = self.get_openai_client()
@@ -349,7 +394,7 @@ IMPORTANT INSTRUCTIONS:
                             "content": [
                                 {
                                     "type": "text",
-                                    "text": self.get_expense_analysis_prompt(),
+                                    "text": self.get_expense_analysis_prompt(context),
                                 },
                                 {
                                     "type": "image_url",
@@ -423,7 +468,7 @@ IMPORTANT INSTRUCTIONS:
         return None  # All retries exhausted
 
     def analyze_expense_with_gpt_direct_pdf(
-        self, pdf_file, filename: str, max_retries: int = 3
+        self, pdf_file, filename: str, context: str = "", max_retries: int = 3
     ) -> Optional[ExpenseData]:
         """Analyze PDF directly using GPT-5 vision without text extraction"""
         client = self.get_openai_client()
@@ -469,7 +514,7 @@ IMPORTANT INSTRUCTIONS:
                                 },
                                 {
                                     "type": "text",
-                                    "text": self.get_expense_analysis_prompt(),
+                                    "text": self.get_expense_analysis_prompt(context),
                                 },
                             ],
                         },
@@ -546,14 +591,14 @@ IMPORTANT INSTRUCTIONS:
         return None  # All retries exhausted
 
     def analyze_expense_with_gpt_fallback(
-        self, text: str, filename: str
+        self, text: str, filename: str, context: str = ""
     ) -> Optional[ExpenseData]:
         """Fallback method: Analyze expense text using GPT-5 (for non-PDF files)"""
         client = self.get_openai_client()
         if not client:
             return None
 
-        prompt = f"""{self.get_expense_analysis_prompt()}
+        prompt = f"""{self.get_expense_analysis_prompt(context)}
 
 Document text:
 {text}"""
@@ -630,16 +675,16 @@ Document text:
 
         return rates
 
-    def auto_prefill_event_info(self, expenses: List[ExpenseData]):
+    def auto_prefill_event_info(self, expenses: List[ExpenseData], context: str = ""):
         """Auto-prefill event information from extracted expense data"""
         if not expenses:
             return
 
         # Generate event name from common patterns
-        event_name = self.generate_event_name_from_expenses(expenses)
+        event_name = self.generate_event_name_from_expenses(expenses, context)
 
         # Generate business purpose from expense descriptions
-        business_purpose = self.generate_business_purpose_from_expenses(expenses)
+        business_purpose = self.generate_business_purpose_from_expenses(expenses, context)
 
         # Get date range from expenses
         dates = [
@@ -659,6 +704,9 @@ Document text:
             last_name = ""
             email = ""
 
+            # Get the allow_external flag from session state
+            allow_external = st.session_state.get("include_external_emails", False)
+
             # Find the first expense with valid personal information
             for exp in expenses:
                 if exp.first_name and not first_name:
@@ -666,7 +714,13 @@ Document text:
                 if exp.last_name and not last_name:
                     last_name = exp.last_name
                 if exp.email and not email:
-                    email = exp.email
+                    # Only use email if it passes domain validation
+                    if self.is_valid_email(exp.email, allow_external):
+                        email = exp.email
+                    else:
+                        logger.info(
+                            f"Filtered out non-Berkeley email: {exp.email} (allow_external={allow_external})"
+                        )
                 # Break early if we have all three
                 if first_name and last_name and email:
                     break
@@ -688,6 +742,8 @@ Document text:
         else:
             # Update existing metadata with extracted info
             # Extract personal information from expenses if not already set
+            allow_external = st.session_state.get("include_external_emails", False)
+
             if not st.session_state.metadata.get("first_name"):
                 for exp in expenses:
                     if exp.first_name:
@@ -702,9 +758,13 @@ Document text:
 
             if not st.session_state.metadata.get("email"):
                 for exp in expenses:
-                    if exp.email:
+                    if exp.email and self.is_valid_email(exp.email, allow_external):
                         st.session_state.metadata["email"] = exp.email
                         break
+                    elif exp.email:
+                        logger.info(
+                            f"Filtered out non-Berkeley email: {exp.email} (allow_external={allow_external})"
+                        )
 
             if not st.session_state.metadata.get("event_name"):
                 st.session_state.metadata["event_name"] = event_name
@@ -715,12 +775,33 @@ Document text:
             if not st.session_state.metadata.get("end_date"):
                 st.session_state.metadata["end_date"] = end_date
 
-    def generate_event_name_from_expenses(self, expenses: List[ExpenseData]) -> str:
+    def generate_event_name_from_expenses(self, expenses: List[ExpenseData], context: str = "") -> str:
         """Generate event name from expense patterns"""
         if not expenses:
             return "Business Event"
 
-        # Look for common business event patterns
+        # If context is provided, prioritize extracting event name from it
+        if context and context.strip():
+            context_lower = context.lower()
+            # Check for common event name indicators in context
+            conference_keywords = [
+                "conference",
+                "meeting",
+                "summit",
+                "workshop",
+                "seminar",
+                "training",
+            ]
+            for keyword in conference_keywords:
+                if keyword in context_lower:
+                    # Try to extract the event name from the sentence containing the keyword
+                    sentences = context.split('.')
+                    for sentence in sentences:
+                        if keyword in sentence.lower():
+                            # Use the first 50 characters of the sentence as the event name
+                            return sentence.strip()[:50]
+
+        # Look for common business event patterns in expense descriptions
         descriptions = [exp.description.lower() for exp in expenses if exp.description]
 
         # Check for conference/meeting patterns
@@ -764,12 +845,115 @@ Document text:
 
         return "Business Event"
 
-    def generate_business_purpose_from_expenses(
-        self, expenses: List[ExpenseData]
+    def generate_business_purpose_with_ai(
+        self, expenses: List[ExpenseData], context: str = ""
     ) -> str:
-        """Generate business purpose from expense descriptions"""
+        """
+        Use AI to generate a compliant business purpose following UC Berkeley best practices.
+        """
         if not expenses:
             return "Business expenses"
+
+        client = self.get_openai_client()
+        if not client:
+            # Fallback to simple generation if OpenAI not available
+            return self.generate_business_purpose_simple(expenses, context)
+
+        # Extract locations and dates from expenses
+        locations = set()
+        dates = []
+        categories = []
+
+        for exp in expenses:
+            categories.append(exp.category)
+            if exp.date:
+                dates.append(exp.date)
+            # Try to extract location from description
+            if exp.description:
+                # Simple heuristic: look for city/location patterns
+                if "to " in exp.description.lower():
+                    parts = exp.description.split("to ")
+                    if len(parts) > 1:
+                        locations.add(parts[-1].strip())
+                if " in " in exp.description.lower():
+                    parts = exp.description.split(" in ")
+                    if len(parts) > 1:
+                        locations.add(parts[-1].strip())
+
+        # Build context for AI
+        expense_summary = f"""
+Trip Details:
+- Number of expenses: {len(expenses)}
+- Categories: {', '.join(set(categories))}
+- Date range: {min(dates) if dates else 'N/A'} to {max(dates) if dates else 'N/A'}
+- Possible locations: {', '.join(locations) if locations else 'Not specified'}
+- Sample expenses: {', '.join([exp.description for exp in expenses[:3] if exp.description])}
+
+User-provided context: {context if context else 'None provided'}
+"""
+
+        prompt = f"""You are writing a business purpose statement for a UC Berkeley Haas School of Business travel expense report.
+
+BEST PRACTICES FOR BUSINESS PURPOSE:
+1. Focus on what was ACCOMPLISHED and how UC Berkeley BENEFITED
+2. Use action verbs like "attending" (not "registering for"), "presenting", "collaborating", "conducting research"
+3. Explain why each leg of the trip was taken and what was accomplished
+4. Be specific but concise (maximum 200 characters)
+5. Focus on the academic/professional benefit to the university
+
+EXAMPLES OF GOOD BUSINESS PURPOSES:
+- "Attending Annual Economics Conference in Boston to present research and network with colleagues from peer institutions"
+- "Collaborating with MIT researchers on behavioral finance project and presenting findings at Harvard seminar"
+- "Conducting field research in New York and meeting with industry partners to advance curriculum development"
+
+{expense_summary}
+
+Generate a business purpose statement (maximum 200 characters) that:
+- Follows the best practices above
+- Explains how UC Berkeley benefited from this travel
+- Uses the user's context if provided, but reframes it in proper business purpose language
+- Is professional and suitable for university financial compliance
+
+Return ONLY the business purpose statement, nothing else."""
+
+        try:
+            response = client.chat.completions.create(
+                model="gpt-5",
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an expert at writing compliant business purpose statements for university expense reports.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                max_completion_tokens=100,
+                temperature=0.7,
+            )
+
+            business_purpose = response.choices[0].message.content.strip()
+
+            # Ensure it's within 200 characters
+            if len(business_purpose) > 200:
+                business_purpose = business_purpose[:197] + "..."
+
+            return business_purpose
+
+        except Exception as e:
+            logger.error(f"Error generating business purpose with AI: {str(e)}")
+            # Fallback to simple generation
+            return self.generate_business_purpose_simple(expenses, context)
+
+    def generate_business_purpose_simple(
+        self, expenses: List[ExpenseData], context: str = ""
+    ) -> str:
+        """Simple fallback business purpose generation (non-AI)"""
+        if not expenses:
+            return "Business expenses"
+
+        # If context is provided, use it as the primary business purpose
+        if context and context.strip():
+            # Use the context directly, truncated to a reasonable length
+            return context.strip()[:200] if len(context.strip()) > 200 else context.strip()
 
         # Get unique descriptions (first 3)
         descriptions = list(
@@ -782,6 +966,20 @@ Document text:
             return f"Business expenses: {descriptions[0]} and {descriptions[1]}"
         else:
             return f"Business expenses: {', '.join(descriptions)} and {len(expenses) - 3} other items"
+
+    def generate_business_purpose_from_expenses(
+        self, expenses: List[ExpenseData], context: str = ""
+    ) -> str:
+        """Generate business purpose from expense descriptions - uses AI if enabled"""
+        # Check if user wants AI-powered generation
+        use_ai = st.session_state.get("use_ai_business_purpose", False)
+
+        if use_ai:
+            # Use AI-powered generation for better compliance (slower)
+            return self.generate_business_purpose_with_ai(expenses, context)
+        else:
+            # Use simple/fast generation (default)
+            return self.generate_business_purpose_simple(expenses, context)
 
     def extract_name_from_expenses(self, expenses):
         """Try to extract name from expense documents"""
@@ -858,8 +1056,10 @@ Document text:
                 )
 
             description = st.text_area(
-                "Event Description",
+                "Business Purpose / Event Description (max 200 characters)",
                 value=st.session_state.metadata.get("description", ""),
+                max_chars=200,
+                help="Explain how UC Berkeley benefited from this travel. Focus on what was ACCOMPLISHED (e.g., 'Attending conference to present research' not 'Registering for conference'). Include why each leg of the trip was taken.",
             )
 
             # Filter out USD from both options and defaults
@@ -880,35 +1080,44 @@ Document text:
 
             if submitted:
                 if first_name and last_name and email and event_name:
-                    median_date = start_date  # Use start date as median
-                    all_currencies = ["USD"] + currencies
-
-                    with st.spinner("Fetching exchange rates..."):
-                        exchange_rates = self.get_exchange_rates(
-                            all_currencies, median_date.strftime("%Y-%m-%d")
+                    # Validate email domain
+                    allow_external = st.session_state.get("include_external_emails", False)
+                    if not self.is_valid_email(email, allow_external):
+                        st.error(
+                            f"⚠️ Email '{email}' is not a Berkeley email address (@berkeley.edu). "
+                            "If this is for an external guest/speaker, please check the "
+                            "'Include external guest/speaker expenses' checkbox above."
                         )
+                    else:
+                        median_date = start_date  # Use start date as median
+                        all_currencies = ["USD"] + currencies
 
-                    st.session_state.metadata = {
-                        "first_name": first_name,
-                        "last_name": last_name,
-                        "email": email,
-                        "event_name": event_name,
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "description": description,
-                        "currencies": all_currencies,
-                        "exchange_rates": exchange_rates,
-                        "median_date": median_date.strftime("%Y-%m-%d"),
-                    }
+                        with st.spinner("Fetching exchange rates..."):
+                            exchange_rates = self.get_exchange_rates(
+                                all_currencies, median_date.strftime("%Y-%m-%d")
+                            )
 
-                    # Set flag to indicate user should go to review tab
-                    st.session_state.show_review_next = True
+                        st.session_state.metadata = {
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "email": email,
+                            "event_name": event_name,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "description": description,
+                            "currencies": all_currencies,
+                            "exchange_rates": exchange_rates,
+                            "median_date": median_date.strftime("%Y-%m-%d"),
+                        }
 
-                    st.success(
-                        "✅ Event information saved! Please go to the **Review** tab to verify your expenses."
-                    )
-                    st.balloons()
-                    # Don't rerun - let user see the message and balloons
+                        # Set flag to indicate user should go to review tab
+                        st.session_state.show_review_next = True
+
+                        st.success(
+                            "✅ Event information saved! Please go to the **Review** tab to verify your expenses."
+                        )
+                        st.balloons()
+                        # Don't rerun - let user see the message and balloons
                 else:
                     st.error("Please fill in all required fields (marked with *)")
 
@@ -1132,8 +1341,10 @@ Document text:
                 )
 
             description = st.text_area(
-                "Event Description",
+                "Business Purpose / Event Description (max 200 characters)",
                 value=st.session_state.metadata.get("description", ""),
+                max_chars=200,
+                help="Explain how UC Berkeley benefited from this travel. Focus on what was ACCOMPLISHED (e.g., 'Attending conference to present research' not 'Registering for conference'). Include why each leg of the trip was taken.",
             )
 
             # Filter out USD from both options and defaults
@@ -1152,29 +1363,38 @@ Document text:
 
             if submitted:
                 if first_name and last_name and email and event_name:
-                    median_date = start_date  # Use start date as median
-                    all_currencies = ["USD"] + currencies
-
-                    with st.spinner("Fetching exchange rates..."):
-                        exchange_rates = self.get_exchange_rates(
-                            all_currencies, median_date.strftime("%Y-%m-%d")
+                    # Validate email domain
+                    allow_external = st.session_state.get("include_external_emails", False)
+                    if not self.is_valid_email(email, allow_external):
+                        st.error(
+                            f"⚠️ Email '{email}' is not a Berkeley email address (@berkeley.edu). "
+                            "If this is for an external guest/speaker, please check the "
+                            "'Include external guest/speaker expenses' checkbox above."
                         )
+                    else:
+                        median_date = start_date  # Use start date as median
+                        all_currencies = ["USD"] + currencies
 
-                    st.session_state.metadata = {
-                        "first_name": first_name,
-                        "last_name": last_name,
-                        "email": email,
-                        "event_name": event_name,
-                        "start_date": start_date,
-                        "end_date": end_date,
-                        "description": description,
-                        "currencies": all_currencies,
-                        "exchange_rates": exchange_rates,
-                        "median_date": median_date.strftime("%Y-%m-%d"),
-                    }
+                        with st.spinner("Fetching exchange rates..."):
+                            exchange_rates = self.get_exchange_rates(
+                                all_currencies, median_date.strftime("%Y-%m-%d")
+                            )
 
-                    st.success("✅ Event information saved!")
-                    # Streamlit will automatically rerun after form submission
+                        st.session_state.metadata = {
+                            "first_name": first_name,
+                            "last_name": last_name,
+                            "email": email,
+                            "event_name": event_name,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "description": description,
+                            "currencies": all_currencies,
+                            "exchange_rates": exchange_rates,
+                            "median_date": median_date.strftime("%Y-%m-%d"),
+                        }
+
+                        st.success("✅ Event information saved!")
+                        # Streamlit will automatically rerun after form submission
                 else:
                     st.error("Please fill in all required fields (marked with *)")
 
@@ -1187,6 +1407,30 @@ Document text:
             st.info(
                 "💡 You can upload documents first, then fill in event details. The AI will extract expense information from your documents."
             )
+
+        # Additional context text area
+        st.markdown("#### 📝 Additional Context (Optional)")
+        st.session_state.additional_context = st.text_area(
+            "Provide any additional details about this trip or event",
+            value=st.session_state.additional_context,
+            placeholder="Example: Attended the Annual Economics Conference in Boston. Met with research collaborators from MIT and Harvard to discuss ongoing project on behavioral finance...",
+            help="This information helps the AI better understand the purpose of your expenses and generate more accurate business purpose descriptions.",
+            height=100,
+        )
+
+        # Email privacy settings
+        st.session_state.include_external_emails = st.checkbox(
+            "Include external guest/speaker expenses (allows non-Berkeley emails)",
+            value=st.session_state.include_external_emails,
+            help="By default, only @berkeley.edu emails are extracted to protect privacy. Check this if submitting expenses for external speakers or guests from other universities.",
+        )
+
+        # AI business purpose toggle
+        st.session_state.use_ai_business_purpose = st.checkbox(
+            "🤖 Use AI to generate compliant business purpose (slower, more accurate)",
+            value=st.session_state.use_ai_business_purpose,
+            help="Enable this to use AI (GPT-5) to generate a UC Berkeley-compliant business purpose. Disabled by default for faster processing.",
+        )
 
         uploaded_files = st.file_uploader(
             "Choose PDF or image files",
@@ -1212,130 +1456,149 @@ Document text:
             # Render the inline event form
             self.render_inline_event_form()
 
+    def process_single_file(self, file, context: str = ""):
+        """Process a single file and return expense data"""
+        try:
+            # Use GPT-5 direct processing for both PDFs and images
+            if file.type == "application/pdf":
+                # Check file size before processing
+                file.seek(0)
+                file_content = file.read()
+                file.seek(0)  # Reset for processing
+
+                if len(file_content) == 0:
+                    return None, f"❌ {file.name} is empty. Please check the file and try again.", "error"
+
+                logger.info(
+                    f"Processing PDF {file.name} ({len(file_content)} bytes)"
+                )
+                expense_data = self.analyze_expense_with_gpt_direct_pdf(
+                    file, file.name, context
+                )
+                if expense_data:
+                    success_msg = f"✅ Processed {file.name} with GPT-5 direct PDF analysis"
+                    # Add personal info to message
+                    if (
+                        expense_data.first_name
+                        or expense_data.last_name
+                        or expense_data.email
+                    ):
+                        personal_parts = []
+                        if expense_data.first_name or expense_data.last_name:
+                            name = f"{expense_data.first_name or ''} {expense_data.last_name or ''}".strip()
+                            personal_parts.append(f"Name: {name}")
+                        if expense_data.email:
+                            personal_parts.append(f"Email: {expense_data.email}")
+                        success_msg += f" | 📋 Extracted: {', '.join(personal_parts)}"
+                    return expense_data, success_msg, "success"
+                else:
+                    # Fallback: Try text extraction method
+                    text = self.extract_text_from_pdf(file)
+                    if text:
+                        expense_data = self.analyze_expense_with_gpt_fallback(
+                            text, file.name, context
+                        )
+                        if expense_data:
+                            success_msg = f"✅ Processed {file.name} with text extraction fallback"
+                            if (
+                                expense_data.first_name
+                                or expense_data.last_name
+                                or expense_data.email
+                            ):
+                                personal_parts = []
+                                if (
+                                    expense_data.first_name
+                                    or expense_data.last_name
+                                ):
+                                    name = f"{expense_data.first_name or ''} {expense_data.last_name or ''}".strip()
+                                    personal_parts.append(f"Name: {name}")
+                                if expense_data.email:
+                                    personal_parts.append(
+                                        f"Email: {expense_data.email}"
+                                    )
+                                success_msg += (
+                                    f" | 📋 Extracted: {', '.join(personal_parts)}"
+                                )
+                            return expense_data, success_msg, "success"
+                        else:
+                            return None, f"❌ Failed to analyze {file.name} even with text extraction", "error"
+                    else:
+                        return None, f"❌ Could not extract text from {file.name}", "error"
+            else:
+                # For images, use GPT-5 vision directly
+                expense_data = self.analyze_expense_with_gpt_image(
+                    file, file.name, context
+                )
+                if expense_data:
+                    success_msg = f"✅ Processed {file.name} with GPT-5 vision"
+                    if (
+                        expense_data.first_name
+                        or expense_data.last_name
+                        or expense_data.email
+                    ):
+                        personal_parts = []
+                        if expense_data.first_name or expense_data.last_name:
+                            name = f"{expense_data.first_name or ''} {expense_data.last_name or ''}".strip()
+                            personal_parts.append(f"Name: {name}")
+                        if expense_data.email:
+                            personal_parts.append(f"Email: {expense_data.email}")
+                        success_msg += (
+                            f" | 📋 Extracted: {', '.join(personal_parts)}"
+                        )
+                    return expense_data, success_msg, "success"
+                else:
+                    return None, f"❌ Failed to analyze {file.name}", "error"
+
+        except Exception as e:
+            return None, f"❌ Error processing {file.name}: {str(e)}", "error"
+
     def process_uploaded_files(self, uploaded_files):
-        """Process uploaded files and extract expense data"""
+        """Process uploaded files in parallel and extract expense data"""
         progress_bar = st.progress(0)
         status_text = st.empty()
 
         processed_expenses = []
+        total_files = len(uploaded_files)
+        completed_count = 0
 
-        for i, file in enumerate(uploaded_files):
-            progress = (i + 1) / len(uploaded_files)
-            progress_bar.progress(progress)
-            status_text.text(f"Processing {file.name}...")
+        # Create a container for status messages
+        message_container = st.container()
 
-            try:
-                # Use GPT-5 direct processing for both PDFs and images
-                if file.type == "application/pdf":
-                    # Check file size before processing
-                    file.seek(0)
-                    file_content = file.read()
-                    file.seek(0)  # Reset for processing
+        # Get context once
+        context = st.session_state.additional_context
 
-                    if len(file_content) == 0:
-                        st.error(
-                            f"❌ {file.name} is empty. Please check the file and try again."
-                        )
-                        continue
+        # Process files in parallel using ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(5, total_files)) as executor:
+            # Submit all files for processing
+            future_to_file = {
+                executor.submit(self.process_single_file, file, context): file
+                for file in uploaded_files
+            }
 
-                    logger.info(
-                        f"Processing PDF {file.name} ({len(file_content)} bytes)"
-                    )
-                    st.info(f"🚀 Using GPT-5 direct PDF processing for {file.name}")
-                    expense_data = self.analyze_expense_with_gpt_direct_pdf(
-                        file, file.name
-                    )
-                    if expense_data:
+            # Process results as they complete
+            for future in as_completed(future_to_file):
+                file = future_to_file[future]
+                completed_count += 1
+
+                # Update progress
+                progress = completed_count / total_files
+                progress_bar.progress(progress)
+                status_text.text(
+                    f"Processing complete: {completed_count}/{total_files} files"
+                )
+
+                # Get result from future
+                expense_data, message, status = future.result()
+
+                # Display message based on status
+                with message_container:
+                    if status == "success" and expense_data:
                         processed_expenses.append(expense_data)
-                        success_msg = (
-                            f"✅ Processed {file.name} with GPT-5 direct PDF analysis"
-                        )
-                        # Show extracted personal info
-                        if (
-                            expense_data.first_name
-                            or expense_data.last_name
-                            or expense_data.email
-                        ):
-                            personal_parts = []
-                            if expense_data.first_name or expense_data.last_name:
-                                name = f"{expense_data.first_name or ''} {expense_data.last_name or ''}".strip()
-                                personal_parts.append(f"Name: {name}")
-                            if expense_data.email:
-                                personal_parts.append(f"Email: {expense_data.email}")
-                            success_msg += (
-                                f" | 📋 Extracted: {', '.join(personal_parts)}"
-                            )
-                        st.success(success_msg)
+                        st.success(message)
+                    elif status == "error":
+                        st.error(message)
                     else:
-                        # Fallback: Try text extraction method
-                        st.warning(
-                            f"⚠️ Direct PDF processing failed for {file.name}. "
-                            "Trying text extraction fallback..."
-                        )
-                        text = self.extract_text_from_pdf(file)
-                        if text:
-                            st.info(f"📄 Extracted text from {file.name}, analyzing...")
-                            expense_data = self.analyze_expense_with_gpt_fallback(
-                                text, file.name
-                            )
-                            if expense_data:
-                                processed_expenses.append(expense_data)
-                                success_msg = f"✅ Processed {file.name} with text extraction fallback"
-                                # Show extracted personal info
-                                if (
-                                    expense_data.first_name
-                                    or expense_data.last_name
-                                    or expense_data.email
-                                ):
-                                    personal_parts = []
-                                    if (
-                                        expense_data.first_name
-                                        or expense_data.last_name
-                                    ):
-                                        name = f"{expense_data.first_name or ''} {expense_data.last_name or ''}".strip()
-                                        personal_parts.append(f"Name: {name}")
-                                    if expense_data.email:
-                                        personal_parts.append(
-                                            f"Email: {expense_data.email}"
-                                        )
-                                    success_msg += (
-                                        f" | 📋 Extracted: {', '.join(personal_parts)}"
-                                    )
-                                st.success(success_msg)
-                            else:
-                                st.error(
-                                    f"❌ Failed to analyze {file.name} even with text extraction"
-                                )
-                        else:
-                            st.error(f"❌ Could not extract text from {file.name}")
-                else:
-                    # For images, use GPT-5 vision directly
-                    st.info(f"🚀 Using GPT-5 vision for {file.name}")
-                    expense_data = self.analyze_expense_with_gpt_image(file, file.name)
-                    if expense_data:
-                        processed_expenses.append(expense_data)
-                        success_msg = f"✅ Processed {file.name} with GPT-5 vision"
-                        # Show extracted personal info
-                        if (
-                            expense_data.first_name
-                            or expense_data.last_name
-                            or expense_data.email
-                        ):
-                            personal_parts = []
-                            if expense_data.first_name or expense_data.last_name:
-                                name = f"{expense_data.first_name or ''} {expense_data.last_name or ''}".strip()
-                                personal_parts.append(f"Name: {name}")
-                            if expense_data.email:
-                                personal_parts.append(f"Email: {expense_data.email}")
-                            success_msg += (
-                                f" | 📋 Extracted: {', '.join(personal_parts)}"
-                            )
-                        st.success(success_msg)
-                    else:
-                        st.error(f"❌ Failed to analyze {file.name}")
-
-            except Exception as e:
-                st.error(f"❌ Error processing {file.name}: {str(e)}")
+                        st.warning(message)
 
         # Update session state
         st.session_state.expenses.extend(processed_expenses)
@@ -1348,7 +1611,9 @@ Document text:
             st.success(f"Successfully processed {len(processed_expenses)} documents!")
 
             # Auto-prefill event information from extracted data
-            self.auto_prefill_event_info(processed_expenses)
+            self.auto_prefill_event_info(
+                processed_expenses, st.session_state.additional_context
+            )
 
             # Show what personal information was extracted
             extracted_info = []
@@ -1365,6 +1630,21 @@ Document text:
                     "🎯 **Auto-extracted personal information:**\n"
                     + "\n".join(f"- {info}" for info in extracted_info)
                 )
+
+            # Show note about business purpose generation
+            if st.session_state.metadata.get("description"):
+                if st.session_state.get("use_ai_business_purpose", False):
+                    st.success(
+                        f"🤖 **AI-generated business purpose:** {st.session_state.metadata['description']}\n\n"
+                        "✏️ **Please review and edit** the business purpose below to ensure it accurately reflects "
+                        "how UC Berkeley benefited from this travel."
+                    )
+                else:
+                    st.info(
+                        f"📝 **Auto-generated business purpose:** {st.session_state.metadata['description']}\n\n"
+                        "✏️ **Please review and edit** the business purpose below. "
+                        "You can enable AI-powered generation (slower but more compliant) using the checkbox above."
+                    )
 
             # Set flag to show Event Info content prominently
             st.session_state.show_event_info = True
@@ -1574,6 +1854,9 @@ Document text:
             st.session_state.processing_complete = False
             st.session_state.show_event_info = False
             st.session_state.show_review_next = False
+            st.session_state.additional_context = ""
+            st.session_state.include_external_emails = False
+            st.session_state.use_ai_business_purpose = False
             # Streamlit will automatically rerun after state changes
 
     def run(self):
@@ -1639,11 +1922,16 @@ if __name__ == "__main__":
         logger.info("App instance created, calling run()")
         app.run()
         logger.info("App run() completed")
-    except RerunException:
-        # RerunException is normal Streamlit behavior, not an error
-        # It's raised when st.rerun() is called to refresh the app
-        raise
     except Exception as e:
+        # Check if it's a RerunException or StopException (normal Streamlit behavior)
+        if RerunException is not None and isinstance(e, RerunException):
+            # RerunException is normal Streamlit behavior, not an error
+            # It's raised when st.rerun() is called to refresh the app
+            raise
+        if StopException is not None and isinstance(e, StopException):
+            # StopException is normal Streamlit behavior, not an error
+            # It's raised when the script execution is stopped for a rerun
+            raise
         logger.error(f"FATAL ERROR in main: {str(e)}")
         import traceback
 
