@@ -14,6 +14,8 @@ import PyPDF2
 import io
 from pydantic import BaseModel
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import boto3
+from botocore.exceptions import ClientError
 
 # Handle different Streamlit versions
 try:
@@ -217,6 +219,8 @@ class ExpenseReportApp:
             st.session_state.include_external_emails = False
         if "use_ai_business_purpose" not in st.session_state:
             st.session_state.use_ai_business_purpose = False
+        if "uploaded_files_data" not in st.session_state:
+            st.session_state.uploaded_files_data = {}
         logger.info("Session state setup complete")
 
     def is_valid_email(self, email: str, allow_external: bool = False) -> bool:
@@ -1248,6 +1252,137 @@ Return ONLY the business purpose statement, nothing else."""
             logger.error(f"Google Sheets error: {str(e)}")
             return False
 
+    def get_s3_client(self):
+        """Initialize AWS S3 client"""
+        try:
+            aws_access_key = st.secrets.get("AWS_ACCESS_KEY_ID") or os.getenv("AWS_ACCESS_KEY_ID")
+            aws_secret_key = st.secrets.get("AWS_SECRET_ACCESS_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
+            aws_region = st.secrets.get("AWS_REGION") or os.getenv("AWS_REGION", "us-west-2")
+
+            if not aws_access_key or not aws_secret_key:
+                logger.error("AWS credentials not found")
+                return None
+
+            return boto3.client(
+                's3',
+                aws_access_key_id=aws_access_key,
+                aws_secret_access_key=aws_secret_key,
+                region_name=aws_region
+            )
+        except Exception as e:
+            logger.error(f"Failed to initialize S3 client: {str(e)}")
+            return None
+
+    def merge_files_to_pdf(self, files_data: Dict[str, bytes]) -> Optional[bytes]:
+        """
+        Merge all PDFs and images into a single PDF.
+
+        Args:
+            files_data: dict of {filename: bytes}
+
+        Returns:
+            Combined PDF as bytes, or None if failed
+        """
+        from PIL import Image
+        from PyPDF2 import PdfReader, PdfWriter
+
+        try:
+            pdf_writer = PdfWriter()
+
+            # Sort files by name for consistent ordering
+            for filename in sorted(files_data.keys()):
+                file_bytes = files_data[filename]
+
+                if filename.lower().endswith('.pdf'):
+                    # Add PDF pages directly
+                    pdf_reader = PdfReader(io.BytesIO(file_bytes))
+                    for page in pdf_reader.pages:
+                        pdf_writer.add_page(page)
+                    logger.info(f"Added PDF to merge: {filename} ({len(pdf_reader.pages)} pages)")
+
+                elif filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    # Convert image to PDF page
+                    image = Image.open(io.BytesIO(file_bytes))
+
+                    # Convert to RGB if necessary (for PNG with transparency)
+                    if image.mode in ('RGBA', 'LA', 'P'):
+                        background = Image.new('RGB', image.size, (255, 255, 255))
+                        if image.mode == 'P':
+                            image = image.convert('RGBA')
+                        background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+                        image = background
+
+                    # Save image as PDF to bytes
+                    img_pdf_bytes = io.BytesIO()
+                    image.save(img_pdf_bytes, 'PDF', resolution=100.0)
+                    img_pdf_bytes.seek(0)
+
+                    # Add image PDF to writer
+                    img_pdf_reader = PdfReader(img_pdf_bytes)
+                    for page in img_pdf_reader.pages:
+                        pdf_writer.add_page(page)
+                    logger.info(f"Added image to merge: {filename}")
+
+            # Write combined PDF to bytes
+            output = io.BytesIO()
+            pdf_writer.write(output)
+            output.seek(0)
+            logger.info(f"Merged {len(files_data)} files into single PDF ({len(pdf_writer.pages)} pages)")
+            return output.read()
+
+        except Exception as e:
+            logger.error(f"Failed to merge files to PDF: {str(e)}")
+            return None
+
+    def upload_files_to_s3(self, files_data: Dict[str, bytes]) -> tuple:
+        """
+        Merge all files into a single PDF and upload to AWS S3.
+
+        Args:
+            files_data: dict of {filename: bytes}
+
+        Returns:
+            (success: bool, uploaded_count: int, error_message: str or None)
+        """
+        if not files_data:
+            return True, 0, None
+
+        # Get bucket name from secrets
+        bucket_name = st.secrets.get("S3_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME")
+        if not bucket_name:
+            logger.info("S3 bucket not configured, skipping file upload")
+            return True, 0, None  # Silent skip if not configured
+
+        s3_client = self.get_s3_client()
+        if not s3_client:
+            return False, 0, "Failed to initialize S3 client"
+
+        # Merge all files into single PDF
+        merged_pdf = self.merge_files_to_pdf(files_data)
+        if not merged_pdf:
+            return False, 0, "Failed to merge files into PDF"
+
+        try:
+            # Create S3 key with date and timestamp
+            today = datetime.now().strftime("%Y-%m-%d")
+            timestamp = datetime.now().strftime("%H%M%S")
+            s3_key = f"{today}/{timestamp}_expense_receipts.pdf"
+
+            s3_client.put_object(
+                Bucket=bucket_name,
+                Key=s3_key,
+                Body=merged_pdf,
+                ContentType='application/pdf'
+            )
+
+            logger.info(f"Uploaded merged PDF to S3: {s3_key}")
+            return True, len(files_data), None
+
+        except ClientError as e:
+            error_msg = f"Failed to upload merged PDF: {str(e)}"
+            logger.error(error_msg)
+            return False, 0, error_msg
+
     def render_sidebar(self):
         """Render the sidebar with configuration options"""
         logger.info("Rendering sidebar")
@@ -1297,6 +1432,7 @@ Return ONLY the business purpose statement, nothing else."""
             st.session_state.processing_complete = False
             st.session_state.show_event_info = False
             st.session_state.show_review_next = False
+            st.session_state.uploaded_files_data = {}
             # Streamlit will automatically rerun after state changes
 
     def render_metadata_form(self):
@@ -1566,6 +1702,12 @@ Return ONLY the business purpose statement, nothing else."""
 
         # Get context once
         context = st.session_state.additional_context
+
+        # Store file bytes for later S3 upload
+        for file in uploaded_files:
+            file.seek(0)
+            st.session_state.uploaded_files_data[file.name] = file.read()
+            file.seek(0)  # Reset for processing
 
         # Process files in parallel using ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=min(5, total_files)) as executor:
@@ -1840,6 +1982,19 @@ Return ONLY the business purpose statement, nothing else."""
                     st.success(
                         "✅ Data successfully submitted to both Sheet1 and Details!"
                     )
+
+                    # Upload files to AWS S3
+                    if st.session_state.uploaded_files_data:
+                        with st.spinner("Uploading files to S3..."):
+                            s3_success, uploaded_count, s3_error = self.upload_files_to_s3(
+                                st.session_state.uploaded_files_data
+                            )
+
+                            if s3_success and uploaded_count > 0:
+                                st.success(f"📁 {uploaded_count} file(s) merged into single PDF and uploaded to S3!")
+                            elif not s3_success:
+                                st.warning(f"📁 S3 upload failed: {s3_error}")
+
                     st.balloons()
                 else:
                     st.error(
@@ -1857,6 +2012,7 @@ Return ONLY the business purpose statement, nothing else."""
             st.session_state.additional_context = ""
             st.session_state.include_external_emails = False
             st.session_state.use_ai_business_purpose = False
+            st.session_state.uploaded_files_data = {}
             # Streamlit will automatically rerun after state changes
 
     def run(self):
