@@ -151,6 +151,10 @@ class ExpenseExtraction(BaseModel):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[str] = None
+    # UC Berkeley specific fields
+    expense_type: Optional[str] = None  # TRANSPORTATION, MISCELLANEOUS, DAILY
+    meal_type: Optional[str] = None  # BREAKFAST, LUNCH, DINNER, INCIDENTAL
+    destination: Optional[str] = None  # Extracted location/city
 
 
 @dataclass
@@ -167,21 +171,48 @@ class ExpenseData:
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     email: Optional[str] = None
+    # UC Berkeley specific fields
+    expense_type: Optional[str] = None  # TRANSPORTATION, MISCELLANEOUS, DAILY
+    meal_type: Optional[str] = None  # BREAKFAST, LUNCH, DINNER, INCIDENTAL
+    destination: Optional[str] = None  # Extracted location/city
 
 
-# Constants
+# Constants - UC Berkeley Travel Reimbursement Categories
 EXPENSE_CATEGORIES = {
-    "AIRFARE": "AIRFARE",
-    "ACCOMMODATION_US": "ACCOMMODATION (In US)",
-    "ACCOMMODATION_INT": "ACCOMMODATION (Outside US)",
-    "TRANSIT_US": "RAILWAY/BUS/TAXI (In US)",
-    "TRANSIT_INT": "RAILWAY/BUS/TAXI (Outside US)",
-    "CAR_RENTAL_US": "CAR RENTAL (In US)",
-    "CAR_RENTAL_INT": "CAR RENTAL (Outside US)",
-    "MEALS_US": "MEALS (In US)",
-    "MEALS_INT": "MEALS (Outside US)",
-    "OTHER": "OTHER",
+    # Transportation (Location Expenses)
+    "AIRFARE": "Airfare",
+    "AIRFARE_CHANGE_FEE": "Airfare Change Fee",
+    "RENTAL_CAR": "Rental Car",
+    "PERSONAL_VEHICLE": "Personal Vehicle",
+    "GROUND_TRANSPORT": "Other Ground Transportation",
+    # Miscellaneous (Location Expenses)
+    "CONFERENCE_FEE": "Conference/Event Registration",
+    "SUPPLIES": "Business Meeting Supplies",
+    "OTHER_MISC": "Other Business Expenses",
+    # Daily Expenses
+    "MEAL": "Meal",
+    "LODGING": "Lodging",
 }
+
+# Category groupings for UC Berkeley form
+TRANSPORTATION_CATEGORIES = ["AIRFARE", "AIRFARE_CHANGE_FEE", "RENTAL_CAR", "PERSONAL_VEHICLE", "GROUND_TRANSPORT"]
+MISCELLANEOUS_CATEGORIES = ["CONFERENCE_FEE", "SUPPLIES", "OTHER_MISC"]
+DAILY_CATEGORIES = ["MEAL", "LODGING"]
+
+# Meal types for daily expenses
+MEAL_TYPES = ["BREAKFAST", "LUNCH", "DINNER", "INCIDENTAL"]
+
+# Home departments dropdown
+HOME_DEPARTMENTS = ["BAHSB", "BAERB", "BAECON", "BAFINC", "BAMKTG", "BAMGMT", "BAOPER"]
+
+# Trip duration options
+TRIP_DURATIONS = [
+    "total travel is less than 30 days",
+    "total travel is 30 days or more",
+]
+
+# Trip legs options
+TRIP_LEGS = ["One Destination", "Multiple Destinations"]
 
 CURRENCY_OPTIONS = [
     "USD",
@@ -309,51 +340,61 @@ class ExpenseReportApp:
             return None
 
     def get_expense_analysis_prompt(self, context: str = "") -> str:
-        """Get the standard expense analysis prompt for GPT"""
-        base_prompt = """Analyze this expense document and extract the following information in JSON format:
+        """Get the standard expense analysis prompt for GPT - aligned with UC Berkeley Travel Reimbursement"""
+        base_prompt = """Analyze this expense document and extract the following information in JSON format.
+This is for UC Berkeley's Travel Reimbursement system.
 
 REQUIRED FIELDS:
 1. amount: the total amount paid (as a number, no currency symbols)
 2. currency: the currency code (USD, EUR, CAD, etc.) - default to USD if unclear
-3. description: a brief description of what this expense is for (e.g., "Flight from SFO to NYC", "Hotel stay in Boston")
-4. date: the transaction date in YYYY-MM-DD format. For hotels, use the first day of the stay
-5. category: categorize this into one of the following EXACT categories:
-   - "AIRFARE"
-   - "ACCOMMODATION (In US)"
-   - "ACCOMMODATION (Outside US)"
-   - "RAILWAY/BUS/TAXI (In US)"
-   - "RAILWAY/BUS/TAXI (Outside US)"
-   - "CAR RENTAL (In US)"
-   - "CAR RENTAL (Outside US)"
-   - "MEALS (In US)"
-   - "MEALS (Outside US)"
-   - "OTHER"
-6. confidence: a confidence score from 0.0 to 1.0 indicating how confident you are in the extraction
+3. description: a brief description of what this expense is for (e.g., "Flight SFO to Boston", "Hotel in Boston", "Uber to airport")
+4. date: the transaction date in YYYY-MM-DD format. For hotels, use the check-in date
+5. category: categorize into ONE of these EXACT UC Berkeley categories:
 
-CRITICAL - PERSONAL INFORMATION (extract if ANY name or email is present):
-7. first_name: Extract the first name from ANY of these locations:
-   - Passenger name, traveler name, guest name
-   - Cardholder name, account holder
-   - "Bill to", "Billed to", "Customer"
-   - "Name:", "Guest:", "Passenger:"
-   - Email sender or recipient name
-   - Any name on the receipt or invoice
-   - Name in email header "From:" or "To:"
-8. last_name: Extract the last name from the same locations
-9. email: Extract email address from ANY location including:
-   - Email headers (From:, To:, Reply-to:)
-   - Contact information sections
-   - Customer information
-   - Account details
-   - Any email address visible on the document
+   TRANSPORTATION (for Location Expenses):
+   - "AIRFARE" - flights, airline tickets
+   - "AIRFARE_CHANGE_FEE" - flight change/cancellation fees
+   - "RENTAL_CAR" - car rentals
+   - "PERSONAL_VEHICLE" - mileage, gas for personal car
+   - "GROUND_TRANSPORT" - taxi, Uber, Lyft, train, bus, parking, tolls
+
+   MISCELLANEOUS (for Location Expenses):
+   - "CONFERENCE_FEE" - conference/event registration fees
+   - "SUPPLIES" - business meeting supplies
+   - "OTHER_MISC" - other business expenses
+
+   DAILY EXPENSES:
+   - "MEAL" - food, restaurants, meals
+   - "LODGING" - hotels, accommodation
+
+6. confidence: a confidence score from 0.0 to 1.0
+
+7. expense_type: classify as one of:
+   - "TRANSPORTATION" - for airfare, car rental, ground transport
+   - "MISCELLANEOUS" - for conference fees, supplies, other
+   - "DAILY" - for meals and lodging
+
+8. meal_type (only for MEAL category): one of "BREAKFAST", "LUNCH", "DINNER", or "INCIDENTAL"
+   - Infer from time of day or description if possible
+   - Set to null if not a meal
+
+9. destination: Extract the city/location for this expense (e.g., "Boston", "New York", "San Francisco")
+   - Look for destination cities in flight itineraries
+   - Look for hotel/restaurant locations
+   - Set to null if unclear
+
+PERSONAL INFORMATION (extract if visible):
+10. first_name: Extract from passenger name, guest name, cardholder, email headers
+11. last_name: Extract from same locations
+12. email: Extract any email address visible on the document
 
 IMPORTANT INSTRUCTIONS:
-- THOROUGHLY scan the ENTIRE document for names and email addresses
-- For email documents: Extract sender/recipient name and email from headers
-- For receipts: Look for customer name, cardholder, or guest information
-- Determine if this is in the US or not based on address, city, state, country, or currency indicators
-- If personal information is truly not found after thorough search, set those fields to null
-- Return ONLY valid JSON with these fields, nothing else. No explanations or markdown."""
+- For flights: extract destination city, use departure date
+- For hotels: use check-in date, extract city
+- For meals: try to determine meal type from time or context
+- For Uber/Lyft/taxi: categorize as GROUND_TRANSPORT
+- THOROUGHLY scan for names and emails in headers, customer info, etc.
+- Return ONLY valid JSON with these fields, nothing else."""
 
         if context and context.strip():
             context_addition = f"\n\nADDITIONAL CONTEXT PROVIDED BY USER:\n{context.strip()}\n\nUse this context to better understand the purpose and nature of the expenses, but still extract the specific details from the document itself."
@@ -449,11 +490,14 @@ IMPORTANT INSTRUCTIONS:
                     amount=float(extracted_data.amount or 0),
                     currency=extracted_data.currency or "USD",
                     date=extracted_data.date or datetime.now().strftime("%Y-%m-%d"),
-                    category=extracted_data.category or "OTHER",
+                    category=extracted_data.category or "OTHER_MISC",
                     confidence=float(extracted_data.confidence or 0),
                     first_name=extracted_data.first_name,
                     last_name=extracted_data.last_name,
                     email=extracted_data.email,
+                    expense_type=extracted_data.expense_type,
+                    meal_type=extracted_data.meal_type,
+                    destination=extracted_data.destination,
                 )
 
             except Exception as e:
@@ -567,12 +611,15 @@ IMPORTANT INSTRUCTIONS:
                     currency=extracted_data.currency or "USD",
                     description=extracted_data.description or "Unknown expense",
                     date=extracted_data.date or datetime.now().strftime("%Y-%m-%d"),
-                    category=extracted_data.category or "OTHER",
+                    category=extracted_data.category or "OTHER_MISC",
                     filename=filename,
                     confidence=float(extracted_data.confidence or 0.5),
                     first_name=extracted_data.first_name,
                     last_name=extracted_data.last_name,
                     email=extracted_data.email,
+                    expense_type=extracted_data.expense_type,
+                    meal_type=extracted_data.meal_type,
+                    destination=extracted_data.destination,
                 )
 
             except Exception as e:
@@ -646,12 +693,15 @@ Document text:
                 currency=extracted_data.currency or "USD",
                 description=extracted_data.description or "Unknown expense",
                 date=extracted_data.date or datetime.now().strftime("%Y-%m-%d"),
-                category=extracted_data.category or "OTHER",
+                category=extracted_data.category or "OTHER_MISC",
                 filename=filename,
                 confidence=float(extracted_data.confidence or 0.5),
                 first_name=extracted_data.first_name,
                 last_name=extracted_data.last_name,
                 email=extracted_data.email,
+                expense_type=extracted_data.expense_type,
+                meal_type=extracted_data.meal_type,
+                destination=extracted_data.destination,
             )
 
         except Exception as e:
@@ -1027,63 +1077,146 @@ Return ONLY the business purpose statement, nothing else."""
         return ""
 
     def render_inline_event_form(self):
-        """Render a simplified event form inline in the upload tab"""
+        """Render UC Berkeley Travel Reimbursement aligned form"""
         with st.form("inline_metadata_form"):
+            # === SECTION 1: TRAVELER INFO ===
+            st.markdown("#### 1. Traveler Info")
             col1, col2 = st.columns(2)
 
             with col1:
+                vendor_id = st.text_input(
+                    "Vendor ID*",
+                    value=st.session_state.metadata.get("vendor_id", ""),
+                    help="Your UC employee/vendor ID (e.g., E012345678)"
+                )
                 first_name = st.text_input(
                     "First Name*", value=st.session_state.metadata.get("first_name", "")
                 )
                 last_name = st.text_input(
                     "Last Name*", value=st.session_state.metadata.get("last_name", "")
                 )
+
+            with col2:
                 email = st.text_input(
                     "Email*", value=st.session_state.metadata.get("email", "")
                 )
+                home_department = st.selectbox(
+                    "Home Department*",
+                    options=HOME_DEPARTMENTS,
+                    index=HOME_DEPARTMENTS.index(st.session_state.metadata.get("home_department", "BAHSB")) if st.session_state.metadata.get("home_department") in HOME_DEPARTMENTS else 0
+                )
+                approver = st.text_input(
+                    "Preferred Approver",
+                    value=st.session_state.metadata.get("approver", ""),
+                    help="Name of your preferred approver"
+                )
 
-            with col2:
-                event_name = st.text_input(
-                    "Event Name*", value=st.session_state.metadata.get("event_name", "")
-                )
-                start_date = st.date_input(
-                    "Start Date*",
-                    value=st.session_state.metadata.get(
-                        "start_date", datetime.now().date()
-                    ),
-                )
-                end_date = st.date_input(
-                    "End Date*",
-                    value=st.session_state.metadata.get(
-                        "end_date", datetime.now().date()
-                    ),
-                )
+            st.markdown("---")
+
+            # === SECTION 2: TRIP INFO ===
+            st.markdown("#### 2. Trip Info")
 
             description = st.text_area(
-                "Business Purpose / Event Description (max 200 characters)",
+                "Business Purpose* (max 200 characters)",
                 value=st.session_state.metadata.get("description", ""),
                 max_chars=200,
-                help="Explain how UC Berkeley benefited from this travel. Focus on what was ACCOMPLISHED (e.g., 'Attending conference to present research' not 'Registering for conference'). Include why each leg of the trip was taken.",
+                help="Explain how UC Berkeley benefited from this travel. Focus on what was ACCOMPLISHED.",
             )
 
-            # Filter out USD from both options and defaults
+            col1, col2 = st.columns(2)
+            with col1:
+                trip_duration = st.selectbox(
+                    "Trip Duration*",
+                    options=TRIP_DURATIONS,
+                    index=TRIP_DURATIONS.index(st.session_state.metadata.get("trip_duration", TRIP_DURATIONS[0])) if st.session_state.metadata.get("trip_duration") in TRIP_DURATIONS else 0
+                )
+                num_trip_legs = st.selectbox(
+                    "Number of Trip Legs*",
+                    options=TRIP_LEGS,
+                    index=TRIP_LEGS.index(st.session_state.metadata.get("num_trip_legs", TRIP_LEGS[0])) if st.session_state.metadata.get("num_trip_legs") in TRIP_LEGS else 0
+                )
+
+            with col2:
+                destinations = st.text_input(
+                    "Trip Destination(s)*",
+                    value=st.session_state.metadata.get("destinations", ""),
+                    help="City and state/country (e.g., 'Boston, MA' or 'London, UK')"
+                )
+                event_name = st.text_input(
+                    "Event/Conference Name",
+                    value=st.session_state.metadata.get("event_name", ""),
+                    help="Name of conference or event attended"
+                )
+
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input(
+                    "Travel Start Date*",
+                    value=st.session_state.metadata.get("start_date", datetime.now().date()),
+                )
+            with col2:
+                end_date = st.date_input(
+                    "Travel End Date*",
+                    value=st.session_state.metadata.get("end_date", datetime.now().date()),
+                )
+
+            st.markdown("---")
+
+            # === SECTION 3: SPECIAL CIRCUMSTANCES ===
+            st.markdown("#### 3. Special Circumstances")
+            no_special = st.checkbox(
+                "There are no special circumstances that warrant exceptional approval",
+                value=st.session_state.metadata.get("no_special_circumstances", True)
+            )
+
+            special_circumstances_notes = ""
+            if not no_special:
+                special_circumstances_notes = st.text_area(
+                    "Explain special circumstances (up to 500 characters)",
+                    value=st.session_state.metadata.get("special_circumstances_notes", ""),
+                    max_chars=500,
+                    help="Explain any entertainment meals, lodging over federal rate, personal days, etc."
+                )
+
+            st.markdown("---")
+
+            # === SECTION 4: CHART STRING ===
+            st.markdown("#### 4. Expense Distribution Chart String")
+            st.caption("Enter the chart string for expense distribution")
+
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                chart_bu = st.text_input("BU", value=st.session_state.metadata.get("chart_bu", "1"), max_chars=2)
+                chart_account = st.text_input("Account*", value=st.session_state.metadata.get("chart_account", ""))
+            with col2:
+                chart_fund = st.text_input("Fund*", value=st.session_state.metadata.get("chart_fund", ""))
+                chart_dept = st.text_input("Department*", value=st.session_state.metadata.get("chart_dept", ""))
+            with col3:
+                chart_function = st.text_input("Function*", value=st.session_state.metadata.get("chart_function", ""))
+                chart_cf1 = st.text_input("CF1", value=st.session_state.metadata.get("chart_cf1", ""))
+            with col4:
+                chart_cf2 = st.text_input("CF2", value=st.session_state.metadata.get("chart_cf2", ""))
+
+            st.markdown("---")
+
+            # === CURRENCIES ===
             non_usd_options = [c for c in CURRENCY_OPTIONS if c != "USD"]
             current_currencies = st.session_state.metadata.get("currencies", [])
-            # Remove USD from defaults if it exists
             default_currencies = [c for c in current_currencies if c != "USD"]
 
             currencies = st.multiselect(
-                "Currencies (other than USD)",
+                "Additional Currencies (if expenses are not in USD)",
                 options=non_usd_options,
                 default=default_currencies,
             )
 
             submitted = st.form_submit_button(
-                "💾 Save Event Information", type="primary"
+                "💾 Save Travel Information", type="primary"
             )
 
             if submitted:
-                if first_name and last_name and email and event_name:
+                # Validate required fields
+                if vendor_id and first_name and last_name and email and destinations and chart_account and chart_fund and chart_dept and chart_function:
                     # Validate email domain
                     allow_external = st.session_state.get("include_external_emails", False)
                     if not self.is_valid_email(email, allow_external):
@@ -1093,7 +1226,7 @@ Return ONLY the business purpose statement, nothing else."""
                             "'Include external guest/speaker expenses' checkbox above."
                         )
                     else:
-                        median_date = start_date  # Use start date as median
+                        median_date = start_date
                         all_currencies = ["USD"] + currencies
 
                         with st.spinner("Fetching exchange rates..."):
@@ -1101,40 +1234,64 @@ Return ONLY the business purpose statement, nothing else."""
                                 all_currencies, median_date.strftime("%Y-%m-%d")
                             )
 
+                        # Build chart string
+                        chart_string = f"{chart_bu}-{chart_account}-{chart_fund}-{chart_dept}-{chart_function}"
+                        if chart_cf1:
+                            chart_string += f"-{chart_cf1}"
+                        if chart_cf2:
+                            chart_string += f"-{chart_cf2}"
+
                         st.session_state.metadata = {
+                            # Traveler Info
+                            "vendor_id": vendor_id,
                             "first_name": first_name,
                             "last_name": last_name,
                             "email": email,
+                            "home_department": home_department,
+                            "approver": approver,
+                            # Trip Info
                             "event_name": event_name,
+                            "description": description,
+                            "trip_duration": trip_duration,
+                            "num_trip_legs": num_trip_legs,
+                            "destinations": destinations,
                             "start_date": start_date,
                             "end_date": end_date,
-                            "description": description,
+                            # Special Circumstances
+                            "no_special_circumstances": no_special,
+                            "special_circumstances_notes": special_circumstances_notes,
+                            # Chart String
+                            "chart_bu": chart_bu,
+                            "chart_account": chart_account,
+                            "chart_fund": chart_fund,
+                            "chart_dept": chart_dept,
+                            "chart_function": chart_function,
+                            "chart_cf1": chart_cf1,
+                            "chart_cf2": chart_cf2,
+                            "chart_string": chart_string,
+                            # Currency
                             "currencies": all_currencies,
                             "exchange_rates": exchange_rates,
                             "median_date": median_date.strftime("%Y-%m-%d"),
                         }
 
-                        # Set flag to indicate user should go to review tab
                         st.session_state.show_review_next = True
-
                         st.success(
-                            "✅ Event information saved! Please go to the **Review** tab to verify your expenses."
+                            "✅ Travel information saved! Please go to the **Review** tab to verify your expenses."
                         )
                         st.balloons()
-                        # Don't rerun - let user see the message and balloons
                 else:
                     st.error("Please fill in all required fields (marked with *)")
 
     def submit_to_google_sheets(
         self, expenses: List[ExpenseData], metadata: Dict
     ) -> bool:
-        """Submit data to Google Sheets - individual expenses and summary"""
+        """Submit data to Google Sheets - UC Berkeley Travel Reimbursement format"""
         client = self.get_google_sheets_client()
         if not client:
             return False
 
         try:
-            # You'll need to replace this with your actual Google Sheet ID
             sheet_id = st.secrets.get("GOOGLE_SHEET_ID") or os.getenv("GOOGLE_SHEET_ID")
             if not sheet_id:
                 st.error("Google Sheet ID not configured")
@@ -1142,108 +1299,154 @@ Return ONLY the business purpose statement, nothing else."""
 
             spreadsheet = client.open_by_key(sheet_id)
 
-            # Calculate totals first
-            total_amount_usd = 0
-            category_totals = {}
+            # Group expenses by category type and calculate totals
+            transport_total = 0.0
+            misc_total = 0.0
+            meals_total = 0.0
+            lodging_total = 0.0
+
+            transportation_expenses = []
+            miscellaneous_expenses = []
+            meal_expenses = []
+            lodging_expenses = []
 
             for expense in expenses:
                 exchange_rate = metadata.get("exchange_rates", {}).get(
                     expense.currency, 1.0
                 )
                 amount_usd = expense.amount * exchange_rate
-                total_amount_usd += amount_usd
 
-                # Track category totals
-                category = expense.category
-                category_totals[category] = (
-                    category_totals.get(category, 0) + amount_usd
-                )
+                # Find the category key
+                cat_key = None
+                for key, val in EXPENSE_CATEGORIES.items():
+                    if val == expense.category or key == expense.category:
+                        cat_key = key
+                        break
 
-            # Sheet1: Event summary (one row per event)
+                if cat_key in TRANSPORTATION_CATEGORIES:
+                    transport_total += amount_usd
+                    transportation_expenses.append((expense, amount_usd))
+                elif cat_key in MISCELLANEOUS_CATEGORIES:
+                    misc_total += amount_usd
+                    miscellaneous_expenses.append((expense, amount_usd))
+                elif cat_key == "MEAL":
+                    meals_total += amount_usd
+                    meal_expenses.append((expense, amount_usd))
+                elif cat_key == "LODGING":
+                    lodging_total += amount_usd
+                    lodging_expenses.append((expense, amount_usd))
+                else:
+                    misc_total += amount_usd
+                    miscellaneous_expenses.append((expense, amount_usd))
+
+            grand_total = transport_total + misc_total + meals_total + lodging_total
+
+            # Sheet1: Summary in UC Berkeley order
             sheet1 = spreadsheet.sheet1
 
-            # Prepare category breakdown string
-            category_breakdown = ", ".join(
-                [f"{cat}: ${amt:.2f}" for cat, amt in category_totals.items()]
-            )
-
-            # Submit summary row to Sheet1
-            # Convert dates to strings if they're date objects
+            # Convert dates to strings
             start_date = metadata.get("start_date", "")
             end_date = metadata.get("end_date", "")
-
             if hasattr(start_date, "strftime"):
                 start_date = start_date.strftime("%Y-%m-%d")
             if hasattr(end_date, "strftime"):
                 end_date = end_date.strftime("%Y-%m-%d")
 
+            # Special circumstances
+            special_circumstances = "None"
+            if not metadata.get("no_special_circumstances", True):
+                special_circumstances = metadata.get("special_circumstances_notes", "See notes")
+
+            # UC Berkeley ordered summary row
             summary_row = [
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Timestamp
-                metadata.get("event_name", ""),
-                metadata.get("first_name", ""),
-                metadata.get("last_name", ""),
-                metadata.get("email", ""),
-                start_date,
-                end_date,
-                metadata.get("description", ""),
-                round(total_amount_usd, 2),
-                len(expenses),
-                category_breakdown,
-                "USD",
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # 1. Timestamp
+                metadata.get("vendor_id", ""),                  # 2. Vendor ID
+                metadata.get("first_name", ""),                 # 3. First Name
+                metadata.get("last_name", ""),                  # 4. Last Name
+                metadata.get("email", ""),                      # 5. Email
+                metadata.get("home_department", ""),            # 6. Home Department
+                metadata.get("approver", ""),                   # 7. Approver
+                metadata.get("description", ""),                # 8. Business Purpose
+                metadata.get("trip_duration", ""),              # 9. Trip Duration
+                metadata.get("destinations", ""),               # 10. Destinations
+                start_date,                                     # 11. Start Date
+                end_date,                                       # 12. End Date
+                round(transport_total, 2),                      # 13. Transportation Total
+                round(misc_total, 2),                           # 14. Miscellaneous Total
+                round(meals_total, 2),                          # 15. Meals Total
+                round(lodging_total, 2),                        # 16. Lodging Total
+                round(grand_total, 2),                          # 17. Grand Total
+                special_circumstances,                          # 18. Special Circumstances
+                metadata.get("chart_string", ""),               # 19. Chart String
             ]
 
             sheet1.append_row(summary_row)
 
-            # Details sheet: Individual expense details
+            # Details sheet: Individual expenses organized by section
             try:
                 details_sheet = spreadsheet.worksheet("Details")
             except Exception:
-                # Create Details sheet if it doesn't exist
                 details_sheet = spreadsheet.add_worksheet(
                     title="Details", rows="10000", cols="20"
                 )
-                # Add headers
+                # Add headers matching UC Berkeley format
                 headers = [
                     "Timestamp",
-                    "Event Name",
-                    "First Name",
-                    "Last Name",
-                    "Email",
-                    "Invoice Name",
+                    "Vendor ID",
+                    "Name",
+                    "Section",
+                    "Category",
+                    "Description",
+                    "Date",
                     "Amount",
                     "Currency",
-                    "Amount in USD",
-                    "Category",
-                    "Event Date",
-                    "Invoice Files",
-                    "Accuracy",
+                    "Amount USD",
+                    "Meal Type",
+                    "Destination",
+                    "Filename",
+                    "Confidence",
                 ]
                 details_sheet.append_row(headers)
 
-            # Submit individual expenses to Details sheet
-            for expense in expenses:
-                exchange_rate = metadata.get("exchange_rates", {}).get(
-                    expense.currency, 1.0
-                )
-                amount_usd = expense.amount * exchange_rate
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            vendor_id = metadata.get("vendor_id", "")
+            name = f"{metadata.get('first_name', '')} {metadata.get('last_name', '')}".strip()
 
+            # Helper function to add expense rows
+            def add_expense_row(expense, amount_usd, section):
                 row_data = [
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Timestamp
-                    metadata.get("event_name", ""),
-                    metadata.get("first_name", ""),
-                    metadata.get("last_name", ""),
-                    metadata.get("email", ""),
+                    timestamp,
+                    vendor_id,
+                    name,
+                    section,
+                    expense.category,
                     expense.description,
+                    expense.date,
                     expense.amount,
                     expense.currency,
-                    amount_usd,
-                    expense.category,
-                    expense.date,
+                    round(amount_usd, 2),
+                    expense.meal_type or "",
+                    expense.destination or "",
                     expense.filename,
                     expense.confidence,
                 ]
-
                 details_sheet.append_row(row_data)
+
+            # Add Transportation expenses
+            for expense, amount_usd in transportation_expenses:
+                add_expense_row(expense, amount_usd, "TRANSPORTATION")
+
+            # Add Miscellaneous expenses
+            for expense, amount_usd in miscellaneous_expenses:
+                add_expense_row(expense, amount_usd, "MISCELLANEOUS")
+
+            # Add Meals (sorted by date)
+            for expense, amount_usd in sorted(meal_expenses, key=lambda x: x[0].date):
+                add_expense_row(expense, amount_usd, "DAILY - MEALS")
+
+            # Add Lodging (sorted by date)
+            for expense, amount_usd in sorted(lodging_expenses, key=lambda x: x[0].date):
+                add_expense_row(expense, amount_usd, "DAILY - LODGING")
 
             return True
 
@@ -1794,7 +1997,7 @@ Return ONLY the business purpose statement, nothing else."""
             # Streamlit will automatically rerun and show the inline form
 
     def render_expense_review(self):
-        """Render the expense review and editing interface"""
+        """Render the expense review interface organized by UC Berkeley sections"""
         if not st.session_state.expenses:
             return
 
@@ -1803,68 +2006,96 @@ Return ONLY the business purpose statement, nothing else."""
         # Show helpful message if user just saved event info
         if st.session_state.get("show_review_next"):
             st.info(
-                "👀 **Review your extracted expenses below.** You can edit any details if needed, then proceed to the Submit tab."
+                "👀 **Review your extracted expenses below.** Expenses are grouped by UC Berkeley Travel Reimbursement categories. Edit any details if needed, then proceed to the Submit tab."
             )
-            # Clear the flag after showing
             st.session_state.show_review_next = False
 
-        # Summary statistics
-        total_expenses = len(st.session_state.expenses)
-        total_amount_usd = sum(
-            exp.amount
-            * st.session_state.metadata.get("exchange_rates", {}).get(exp.currency, 1.0)
-            for exp in st.session_state.expenses
-        )
+        # Group expenses by category type
+        transportation_expenses = []
+        miscellaneous_expenses = []
+        meal_expenses = []
+        lodging_expenses = []
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Expenses", total_expenses)
-        with col2:
-            st.metric("Total Amount (USD)", f"${total_amount_usd:.2f}")
-        with col3:
-            avg_confidence = (
-                sum(exp.confidence for exp in st.session_state.expenses)
-                / total_expenses
+        for i, exp in enumerate(st.session_state.expenses):
+            # Find the category key from the value
+            cat_key = None
+            for key, val in EXPENSE_CATEGORIES.items():
+                if val == exp.category or key == exp.category:
+                    cat_key = key
+                    break
+
+            if cat_key in TRANSPORTATION_CATEGORIES:
+                transportation_expenses.append((i, exp))
+            elif cat_key in MISCELLANEOUS_CATEGORIES:
+                miscellaneous_expenses.append((i, exp))
+            elif cat_key == "MEAL":
+                meal_expenses.append((i, exp))
+            elif cat_key == "LODGING":
+                lodging_expenses.append((i, exp))
+            else:
+                # Default to miscellaneous
+                miscellaneous_expenses.append((i, exp))
+
+        # Calculate totals by section
+        def calc_section_total(expenses_list):
+            return sum(
+                exp.amount * st.session_state.metadata.get("exchange_rates", {}).get(exp.currency, 1.0)
+                for _, exp in expenses_list
             )
-            st.metric("Avg. Confidence", f"{avg_confidence:.1%}")
 
+        transport_total = calc_section_total(transportation_expenses)
+        misc_total = calc_section_total(miscellaneous_expenses)
+        meals_total = calc_section_total(meal_expenses)
+        lodging_total = calc_section_total(lodging_expenses)
+        grand_total = transport_total + misc_total + meals_total + lodging_total
+
+        # Summary by section
+        st.markdown("### Summary by Section")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Transportation", f"${transport_total:.2f}")
+        with col2:
+            st.metric("Miscellaneous", f"${misc_total:.2f}")
+        with col3:
+            st.metric("Meals", f"${meals_total:.2f}")
+        with col4:
+            st.metric("Lodging", f"${lodging_total:.2f}")
+
+        st.metric("**Grand Total**", f"${grand_total:.2f}")
         st.markdown("---")
 
-        # Expense editing interface
-        for i, expense in enumerate(st.session_state.expenses):
-            with st.expander(f"📄 {expense.filename} - {expense.description[:50]}..."):
+        # Helper function to render expense editor
+        def render_expense_editor(i, expense, section_prefix):
+            with st.expander(f"📄 {expense.filename} - ${expense.amount:.2f} {expense.currency}"):
                 col1, col2 = st.columns(2)
 
                 with col1:
                     new_description = st.text_input(
-                        "Description", value=expense.description, key=f"desc_{i}"
+                        "Description", value=expense.description, key=f"{section_prefix}_desc_{i}"
                     )
                     new_amount = st.number_input(
                         "Amount",
                         value=float(expense.amount),
                         min_value=0.0,
                         step=0.01,
-                        key=f"amount_{i}",
+                        key=f"{section_prefix}_amount_{i}",
                     )
                     new_currency = st.selectbox(
                         "Currency",
                         options=st.session_state.metadata.get("currencies", ["USD"]),
                         index=(
-                            st.session_state.metadata.get("currencies", ["USD"]).index(
-                                expense.currency
-                            )
-                            if expense.currency
-                            in st.session_state.metadata.get("currencies", ["USD"])
+                            st.session_state.metadata.get("currencies", ["USD"]).index(expense.currency)
+                            if expense.currency in st.session_state.metadata.get("currencies", ["USD"])
                             else 0
                         ),
-                        key=f"currency_{i}",
+                        key=f"{section_prefix}_currency_{i}",
                     )
 
                 with col2:
                     new_date = st.date_input(
                         "Date",
                         value=datetime.strptime(expense.date, "%Y-%m-%d").date(),
-                        key=f"date_{i}",
+                        key=f"{section_prefix}_date_{i}",
                     )
                     new_category = st.selectbox(
                         "Category",
@@ -1874,16 +2105,12 @@ Return ONLY the business purpose statement, nothing else."""
                             if expense.category in EXPENSE_CATEGORIES.values()
                             else 0
                         ),
-                        key=f"category_{i}",
+                        key=f"{section_prefix}_category_{i}",
                     )
 
-                    # Show confidence and USD amount
-                    exchange_rate = st.session_state.metadata.get(
-                        "exchange_rates", {}
-                    ).get(new_currency, 1.0)
+                    exchange_rate = st.session_state.metadata.get("exchange_rates", {}).get(new_currency, 1.0)
                     amount_usd = new_amount * exchange_rate
-                    st.info(f"Confidence: {expense.confidence:.1%}")
-                    st.info(f"USD Amount: ${amount_usd:.2f}")
+                    st.info(f"Confidence: {expense.confidence:.1%} | USD: ${amount_usd:.2f}")
 
                 # Update expense data
                 st.session_state.expenses[i] = ExpenseData(
@@ -1894,10 +2121,54 @@ Return ONLY the business purpose statement, nothing else."""
                     category=new_category,
                     filename=expense.filename,
                     confidence=expense.confidence,
+                    first_name=expense.first_name,
+                    last_name=expense.last_name,
+                    email=expense.email,
+                    expense_type=expense.expense_type,
+                    meal_type=expense.meal_type,
+                    destination=expense.destination,
                 )
 
+        # === LOCATION EXPENSES: TRANSPORTATION ===
+        if transportation_expenses:
+            st.markdown("### 🚗 Transportation Expenses")
+            st.caption("Airfare, Rental Car, Ground Transportation")
+            for i, expense in transportation_expenses:
+                render_expense_editor(i, expense, "trans")
+            st.info(f"**Transportation Subtotal: ${transport_total:.2f}**")
+            st.markdown("---")
+
+        # === LOCATION EXPENSES: MISCELLANEOUS ===
+        if miscellaneous_expenses:
+            st.markdown("### 📋 Miscellaneous Expenses")
+            st.caption("Conference Fees, Supplies, Other Business Expenses")
+            for i, expense in miscellaneous_expenses:
+                render_expense_editor(i, expense, "misc")
+            st.info(f"**Miscellaneous Subtotal: ${misc_total:.2f}**")
+            st.markdown("---")
+
+        # === DAILY EXPENSES: MEALS ===
+        if meal_expenses:
+            st.markdown("### 🍽️ Daily Expenses - Meals")
+            st.caption("Meals organized by date")
+            # Sort by date
+            meal_expenses_sorted = sorted(meal_expenses, key=lambda x: x[1].date)
+            for i, expense in meal_expenses_sorted:
+                render_expense_editor(i, expense, "meal")
+            st.info(f"**Meals Subtotal: ${meals_total:.2f}**")
+            st.markdown("---")
+
+        # === DAILY EXPENSES: LODGING ===
+        if lodging_expenses:
+            st.markdown("### 🏨 Daily Expenses - Lodging")
+            st.caption("Lodging organized by date")
+            lodging_expenses_sorted = sorted(lodging_expenses, key=lambda x: x[1].date)
+            for i, expense in lodging_expenses_sorted:
+                render_expense_editor(i, expense, "lodging")
+            st.info(f"**Lodging Subtotal: ${lodging_total:.2f}**")
+
     def render_submission(self):
-        """Render the final submission interface"""
+        """Render the final submission interface with UC Berkeley copy-paste preview"""
         if not st.session_state.expenses or not st.session_state.processing_complete:
             if not st.session_state.expenses:
                 st.info("📎 Please upload and process some expense documents first.")
@@ -1912,45 +2183,186 @@ Return ONLY the business purpose statement, nothing else."""
             )
             return
 
-        # Final summary
-        st.subheader("📋 Final Summary")
+        metadata = st.session_state.metadata
+        expenses = st.session_state.expenses
 
-        # Create summary DataFrame
-        summary_data = []
-        for expense in st.session_state.expenses:
-            exchange_rate = st.session_state.metadata.get("exchange_rates", {}).get(
-                expense.currency, 1.0
-            )
+        # Group expenses by category and calculate totals
+        transport_expenses = []
+        misc_expenses = []
+        meal_expenses = []
+        lodging_expenses = []
+
+        transport_total = 0.0
+        misc_total = 0.0
+        meals_total = 0.0
+        lodging_total = 0.0
+
+        for expense in expenses:
+            exchange_rate = metadata.get("exchange_rates", {}).get(expense.currency, 1.0)
             amount_usd = expense.amount * exchange_rate
 
-            summary_data.append(
-                {
-                    "File": expense.filename,
-                    "Description": expense.description,
-                    "Amount": f"{expense.amount:.2f} {expense.currency}",
-                    "USD Amount": f"${amount_usd:.2f}",
-                    "Category": expense.category,
-                    "Date": expense.date,
-                    "Confidence": f"{expense.confidence:.1%}",
-                }
-            )
+            cat_key = None
+            for key, val in EXPENSE_CATEGORIES.items():
+                if val == expense.category or key == expense.category:
+                    cat_key = key
+                    break
 
-        df = pd.DataFrame(summary_data)
-        st.dataframe(df, use_container_width=True)
+            if cat_key in TRANSPORTATION_CATEGORIES:
+                transport_total += amount_usd
+                transport_expenses.append((expense, amount_usd))
+            elif cat_key in MISCELLANEOUS_CATEGORIES:
+                misc_total += amount_usd
+                misc_expenses.append((expense, amount_usd))
+            elif cat_key == "MEAL":
+                meals_total += amount_usd
+                meal_expenses.append((expense, amount_usd))
+            elif cat_key == "LODGING":
+                lodging_total += amount_usd
+                lodging_expenses.append((expense, amount_usd))
+            else:
+                misc_total += amount_usd
+                misc_expenses.append((expense, amount_usd))
+
+        grand_total = transport_total + misc_total + meals_total + lodging_total
+
+        # Convert dates to strings
+        start_date = metadata.get("start_date", "")
+        end_date = metadata.get("end_date", "")
+        if hasattr(start_date, "strftime"):
+            start_date = start_date.strftime("%m/%d/%Y")
+        if hasattr(end_date, "strftime"):
+            end_date = end_date.strftime("%m/%d/%Y")
+
+        # === COPY-PASTE FRIENDLY PREVIEW ===
+        st.subheader("📋 UC Berkeley Travel Reimbursement Preview")
+        st.caption("Copy this text directly into the UC Berkeley Travel Reimbursement form")
+
+        # Build the copy-paste text
+        preview_lines = []
+
+        # TRAVELER INFO
+        preview_lines.append("=== TRAVELER INFO ===")
+        preview_lines.append(f"Vendor ID: {metadata.get('vendor_id', '')}")
+        preview_lines.append(f"Name: {metadata.get('first_name', '')} {metadata.get('last_name', '')}")
+        preview_lines.append(f"Email: {metadata.get('email', '')}")
+        preview_lines.append(f"Home Department: {metadata.get('home_department', '')}")
+        preview_lines.append(f"Approver: {metadata.get('approver', '')}")
+        preview_lines.append("")
+
+        # TRIP INFO
+        preview_lines.append("=== TRIP INFO ===")
+        preview_lines.append(f"Business Purpose: {metadata.get('description', '')}")
+        preview_lines.append(f"Trip Duration: {metadata.get('trip_duration', '')}")
+        preview_lines.append(f"Destinations: {metadata.get('destinations', '')}")
+        preview_lines.append(f"Travel Dates: {start_date} - {end_date}")
+        if metadata.get('event_name'):
+            preview_lines.append(f"Event/Conference: {metadata.get('event_name', '')}")
+        preview_lines.append("")
+
+        # LOCATION EXPENSES
+        preview_lines.append("=== LOCATION EXPENSES ===")
+
+        # Transportation
+        preview_lines.append("Transportation:")
+        if transport_expenses:
+            for expense, amount_usd in transport_expenses:
+                preview_lines.append(f"  {expense.description}: ${amount_usd:.2f}")
+            preview_lines.append(f"  Subtotal: ${transport_total:.2f}")
+        else:
+            preview_lines.append("  (none)")
+        preview_lines.append("")
+
+        # Miscellaneous
+        preview_lines.append("Miscellaneous:")
+        if misc_expenses:
+            for expense, amount_usd in misc_expenses:
+                preview_lines.append(f"  {expense.description}: ${amount_usd:.2f}")
+            preview_lines.append(f"  Subtotal: ${misc_total:.2f}")
+        else:
+            preview_lines.append("  (none)")
+        preview_lines.append("")
+
+        # DAILY EXPENSES
+        preview_lines.append("=== DAILY EXPENSES ===")
+
+        # Meals (grouped by date)
+        preview_lines.append("Meals:")
+        if meal_expenses:
+            # Group meals by date
+            meals_by_date = {}
+            for expense, amount_usd in meal_expenses:
+                date = expense.date
+                if date not in meals_by_date:
+                    meals_by_date[date] = {"total": 0.0, "types": []}
+                meals_by_date[date]["total"] += amount_usd
+                if expense.meal_type:
+                    meals_by_date[date]["types"].append(expense.meal_type.capitalize())
+
+            for date in sorted(meals_by_date.keys()):
+                meal_info = meals_by_date[date]
+                types_str = f" ({', '.join(meal_info['types'])})" if meal_info['types'] else ""
+                preview_lines.append(f"  {date}: ${meal_info['total']:.2f}{types_str}")
+            preview_lines.append(f"  Subtotal: ${meals_total:.2f}")
+        else:
+            preview_lines.append("  (none)")
+        preview_lines.append("")
+
+        # Lodging (grouped by date)
+        preview_lines.append("Lodging:")
+        if lodging_expenses:
+            # Group lodging by date
+            lodging_by_date = {}
+            for expense, amount_usd in lodging_expenses:
+                date = expense.date
+                lodging_by_date[date] = lodging_by_date.get(date, 0) + amount_usd
+
+            for date in sorted(lodging_by_date.keys()):
+                preview_lines.append(f"  {date}: ${lodging_by_date[date]:.2f}")
+            preview_lines.append(f"  Subtotal: ${lodging_total:.2f}")
+        else:
+            preview_lines.append("  (none)")
+        preview_lines.append("")
+
+        # SPECIAL CIRCUMSTANCES
+        preview_lines.append("=== SPECIAL CIRCUMSTANCES ===")
+        if metadata.get("no_special_circumstances", True):
+            preview_lines.append("None")
+        else:
+            preview_lines.append(metadata.get("special_circumstances_notes", "See notes"))
+        preview_lines.append("")
+
+        # TOTALS
+        preview_lines.append("=== TOTALS ===")
+        preview_lines.append(f"Transportation: ${transport_total:.2f}")
+        preview_lines.append(f"Miscellaneous: ${misc_total:.2f}")
+        preview_lines.append(f"Meals: ${meals_total:.2f}")
+        preview_lines.append(f"Lodging: ${lodging_total:.2f}")
+        preview_lines.append(f"Trip Total: ${grand_total:.2f}")
+        preview_lines.append(f"Chart String: {metadata.get('chart_string', '')}")
+
+        preview_text = "\n".join(preview_lines)
+
+        # Display in a text area for easy copy-paste
+        st.text_area(
+            "Copy-Paste Preview",
+            value=preview_text,
+            height=500,
+            help="Select all (Ctrl+A / Cmd+A) and copy this text to paste into the UC Berkeley form"
+        )
+
+        st.markdown("---")
 
         # Exchange rates used
-        if len(st.session_state.metadata.get("currencies", [])) > 1:
+        if len(metadata.get("currencies", [])) > 1:
             st.subheader("💱 Exchange Rates Used")
             rates_data = []
-            for currency, rate in st.session_state.metadata.get(
-                "exchange_rates", {}
-            ).items():
+            for currency, rate in metadata.get("exchange_rates", {}).items():
                 if currency != "USD":
                     rates_data.append(
                         {
                             "Currency": currency,
                             "Rate to USD": f"{rate:.4f}",
-                            "Date": st.session_state.metadata.get("median_date", "N/A"),
+                            "Date": metadata.get("median_date", "N/A"),
                         }
                     )
 
@@ -1965,8 +2377,8 @@ Return ONLY the business purpose statement, nothing else."""
         st.markdown(
             """
         Export your expense data to Google Sheets:
-        - **Sheet1**: Event totals (one row per event with aggregated data)
-        - **Details**: Individual invoice details (one row per expense)
+        - **Sheet1**: Summary row with totals in UC Berkeley format
+        - **Details**: Individual expenses organized by section (Transportation, Miscellaneous, Meals, Lodging)
         """
         )
 
