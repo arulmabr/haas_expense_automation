@@ -250,6 +250,8 @@ class ExpenseReportApp:
             st.session_state.use_ai_business_purpose = False
         if "uploaded_files_data" not in st.session_state:
             st.session_state.uploaded_files_data = {}
+        if "auto_correction_done" not in st.session_state:
+            st.session_state.auto_correction_done = False
         logger.info("Session state setup complete")
 
     def is_valid_email(self, email: str, allow_external: bool = False) -> bool:
@@ -1940,6 +1942,9 @@ Return ONLY the business purpose statement, nothing else."""
 
     def process_uploaded_files(self, uploaded_files):
         """Process uploaded files in parallel and extract expense data"""
+        # Reset auto-correction flag for new uploads
+        st.session_state.auto_correction_done = False
+
         progress_bar = st.progress(0)
         status_text = st.empty()
 
@@ -2048,22 +2053,25 @@ Return ONLY the business purpose statement, nothing else."""
         if not st.session_state.expenses:
             return
 
-        # Auto-correct categories for all expenses (fixes any that were loaded before code update)
-        corrections_made = []
-        for exp in st.session_state.expenses:
-            old_category = exp.category
-            corrected_category, corrected_expense_type, corrected_meal_type = self.auto_correct_category(
-                exp.description, exp.category, exp.meal_type
-            )
-            if corrected_category != old_category:
-                exp.category = corrected_category
-                exp.expense_type = corrected_expense_type
-                if corrected_meal_type is not None:
-                    exp.meal_type = corrected_meal_type
-                corrections_made.append(f"'{exp.description[:30]}...' → {corrected_category}")
+        # Auto-correct categories for all expenses (only run once per upload)
+        if not st.session_state.get("auto_correction_done", False):
+            corrections_made = []
+            for exp in st.session_state.expenses:
+                old_category = exp.category
+                corrected_category, corrected_expense_type, corrected_meal_type = self.auto_correct_category(
+                    exp.description, exp.category, exp.meal_type
+                )
+                if corrected_category != old_category:
+                    exp.category = corrected_category
+                    exp.expense_type = corrected_expense_type
+                    if corrected_meal_type is not None:
+                        exp.meal_type = corrected_meal_type
+                    corrections_made.append(f"'{exp.description[:30]}...' → {corrected_category}")
 
-        if corrections_made:
-            st.toast(f"🔧 Auto-corrected {len(corrections_made)} expense(s)")
+            if corrections_made:
+                st.toast(f"🔧 Auto-corrected {len(corrections_made)} expense(s)")
+
+            st.session_state.auto_correction_done = True
 
         st.header("📊 Review Extracted Expenses")
 
@@ -2604,6 +2612,7 @@ Return ONLY the business purpose statement, nothing else."""
             st.session_state.include_external_emails = False
             st.session_state.use_ai_business_purpose = False
             st.session_state.uploaded_files_data = {}
+            st.session_state.auto_correction_done = False
             # Streamlit will automatically rerun after state changes
 
     def render_progress_indicator(self):
