@@ -25,6 +25,7 @@ try:
 except ImportError:
     try:
         from streamlit.script_runner import RerunException
+
         StopException = None
     except ImportError:
         # For newer Streamlit versions, RerunException may not be needed
@@ -196,7 +197,13 @@ EXPENSE_CATEGORIES = {
 }
 
 # Category groupings for UC Berkeley form
-TRANSPORTATION_CATEGORIES = ["AIRFARE", "AIRFARE_CHANGE_FEE", "RENTAL_CAR", "PERSONAL_VEHICLE", "GROUND_TRANSPORT"]
+TRANSPORTATION_CATEGORIES = [
+    "AIRFARE",
+    "AIRFARE_CHANGE_FEE",
+    "RENTAL_CAR",
+    "PERSONAL_VEHICLE",
+    "GROUND_TRANSPORT",
+]
 MISCELLANEOUS_CATEGORIES = ["CONFERENCE_FEE", "SUPPLIES", "OTHER_MISC"]
 DAILY_CATEGORIES = ["MEAL", "LODGING"]
 
@@ -288,9 +295,11 @@ class ExpenseReportApp:
         for exp in expenses:
             for other in seen:
                 # Check if same amount and same date (potential duplicate)
-                if (abs(exp.amount - other.amount) < 0.01 and
-                    exp.date == other.date and
-                    exp.currency == other.currency):
+                if (
+                    abs(exp.amount - other.amount) < 0.01
+                    and exp.date == other.date
+                    and exp.currency == other.currency
+                ):
                     duplicates.append((other, exp))
             seen.append(exp)
 
@@ -360,55 +369,149 @@ class ExpenseReportApp:
             logger.error(f"Failed to extract text from PDF: {str(e)}")
             return None
 
-    def auto_correct_category(self, description: str, category: str, meal_type: Optional[str]) -> tuple:
+    def auto_correct_category(
+        self, description: str, category: str, meal_type: Optional[str]
+    ) -> tuple:
         """Auto-correct category based on description keywords when AI makes obvious mistakes"""
         desc_lower = description.lower()
 
         # Keywords that indicate flights (should stay as AIRFARE, don't correct)
-        flight_keywords = ['flight', 'airfare', 'airline', 'boarding', 'united', 'delta',
-                          'american airlines', 'southwest', 'jetblue', 'alaska air', 'spirit',
-                          'frontier', 'sfo', 'lax', 'jfk', 'ord', 'departure', 'arrival']
+        flight_keywords = [
+            "flight",
+            "airfare",
+            "airline",
+            "boarding",
+            "united",
+            "delta",
+            "american airlines",
+            "southwest",
+            "jetblue",
+            "alaska air",
+            "spirit",
+            "frontier",
+            "sfo",
+            "lax",
+            "jfk",
+            "ord",
+            "departure",
+            "arrival",
+        ]
 
         # Keywords that indicate meals
-        meal_keywords = ['meal', 'restaurant', 'food', 'cafe', 'bar', 'kitchen', 'dining',
-                        'breakfast', 'lunch', 'dinner', 'coffee', 'starbucks', 'mcdonalds',
-                        'burger', 'pizza', 'sandwich', 'grill', 'bistro', 'eatery', 'deli']
+        meal_keywords = [
+            "meal",
+            "restaurant",
+            "food",
+            "cafe",
+            "bar",
+            "kitchen",
+            "dining",
+            "breakfast",
+            "lunch",
+            "dinner",
+            "coffee",
+            "starbucks",
+            "mcdonalds",
+            "burger",
+            "pizza",
+            "sandwich",
+            "grill",
+            "bistro",
+            "eatery",
+            "deli",
+        ]
 
         # Keywords that indicate lodging
-        lodging_keywords = ['hotel', 'motel', 'inn', 'airbnb', 'marriott', 'hilton', 'hyatt',
-                          'resort', 'accommodation', 'lodging', 'stay', 'room rate']
+        lodging_keywords = [
+            "hotel",
+            "motel",
+            "inn",
+            "airbnb",
+            "marriott",
+            "hilton",
+            "hyatt",
+            "resort",
+            "accommodation",
+            "lodging",
+            "stay",
+            "room rate",
+        ]
 
         # Keywords that indicate ground transport
-        transport_keywords = ['uber', 'lyft', 'taxi', 'cab', 'train', 'metro', 'subway', 'bus']
+        transport_keywords = [
+            "uber",
+            "lyft",
+            "taxi",
+            "cab",
+            "train",
+            "metro",
+            "subway",
+            "bus",
+        ]
 
         # If it's a flight, keep it as AIRFARE (don't auto-correct)
         if any(kw in desc_lower for kw in flight_keywords):
-            if category in ['AIRFARE', 'Airfare', 'AIRFARE_CHANGE_FEE', 'Airfare Change Fee']:
-                return category, 'TRANSPORTATION', None
+            if category in [
+                "AIRFARE",
+                "Airfare",
+                "AIRFARE_CHANGE_FEE",
+                "Airfare Change Fee",
+            ]:
+                return category, "TRANSPORTATION", None
             # If AI miscategorized a flight, correct it to Airfare
-            logger.info(f"Auto-correcting category from {category} to Airfare for: {description}")
-            return 'Airfare', 'TRANSPORTATION', None
+            logger.info(
+                f"Auto-correcting category from {category} to Airfare for: {description}"
+            )
+            return "Airfare", "TRANSPORTATION", None
 
         # Check for meal indicators (but not if it's a flight)
         if any(kw in desc_lower for kw in meal_keywords):
-            if category not in ['MEAL', 'Meal']:
-                logger.info(f"Auto-correcting category from {category} to Meal for: {description}")
-                return 'Meal', 'DAILY', meal_type
+            if category not in ["MEAL", "Meal"]:
+                logger.info(
+                    f"Auto-correcting category from {category} to Meal for: {description}"
+                )
+                return "Meal", "DAILY", meal_type
 
         # Check for lodging indicators
         if any(kw in desc_lower for kw in lodging_keywords):
-            if category not in ['LODGING', 'Lodging']:
-                logger.info(f"Auto-correcting category from {category} to Lodging for: {description}")
-                return 'Lodging', 'DAILY', None
+            if category not in ["LODGING", "Lodging"]:
+                logger.info(
+                    f"Auto-correcting category from {category} to Lodging for: {description}"
+                )
+                return "Lodging", "DAILY", None
 
         # Check for ground transport indicators (but not for hotels that might mention these)
-        if any(kw in desc_lower for kw in transport_keywords) and not any(kw in desc_lower for kw in lodging_keywords):
-            if category not in ['GROUND_TRANSPORT', 'Other Ground Transportation']:
-                logger.info(f"Auto-correcting category from {category} to Ground Transport for: {description}")
-                return 'Other Ground Transportation', 'TRANSPORTATION', None
+        if any(kw in desc_lower for kw in transport_keywords) and not any(
+            kw in desc_lower for kw in lodging_keywords
+        ):
+            if category not in ["GROUND_TRANSPORT", "Other Ground Transportation"]:
+                logger.info(
+                    f"Auto-correcting category from {category} to Ground Transport for: {description}"
+                )
+                return "Other Ground Transportation", "TRANSPORTATION", None
 
         # Return original if no correction needed
-        expense_type = 'DAILY' if category in ['MEAL', 'Meal', 'LODGING', 'Lodging'] else 'TRANSPORTATION' if category in ['AIRFARE', 'Airfare', 'AIRFARE_CHANGE_FEE', 'Airfare Change Fee', 'RENTAL_CAR', 'Rental Car', 'PERSONAL_VEHICLE', 'Personal Vehicle', 'GROUND_TRANSPORT', 'Other Ground Transportation'] else 'MISCELLANEOUS'
+        expense_type = (
+            "DAILY"
+            if category in ["MEAL", "Meal", "LODGING", "Lodging"]
+            else (
+                "TRANSPORTATION"
+                if category
+                in [
+                    "AIRFARE",
+                    "Airfare",
+                    "AIRFARE_CHANGE_FEE",
+                    "Airfare Change Fee",
+                    "RENTAL_CAR",
+                    "Rental Car",
+                    "PERSONAL_VEHICLE",
+                    "Personal Vehicle",
+                    "GROUND_TRANSPORT",
+                    "Other Ground Transportation",
+                ]
+                else "MISCELLANEOUS"
+            )
+        )
         return category, expense_type, meal_type
 
     def get_expense_analysis_prompt(self, context: str = "") -> str:
@@ -501,7 +604,7 @@ IMPORTANT INSTRUCTIONS:
 
                 # Use structured outputs for reliable JSON extraction
                 response = client.beta.chat.completions.parse(
-                    model="gpt-5",
+                    model="gpt-5.2",
                     messages=[
                         {
                             "role": "system",
@@ -560,8 +663,10 @@ IMPORTANT INSTRUCTIONS:
                 # Auto-correct category based on description
                 description = extracted_data.description or "Unknown expense"
                 category = extracted_data.category or "OTHER_MISC"
-                corrected_category, corrected_expense_type, corrected_meal_type = self.auto_correct_category(
-                    description, category, extracted_data.meal_type
+                corrected_category, corrected_expense_type, corrected_meal_type = (
+                    self.auto_correct_category(
+                        description, category, extracted_data.meal_type
+                    )
                 )
 
                 return ExpenseData(
@@ -627,7 +732,7 @@ IMPORTANT INSTRUCTIONS:
 
                 # Use structured outputs for reliable JSON extraction
                 response = client.beta.chat.completions.parse(
-                    model="gpt-5",
+                    model="gpt-5.2",
                     messages=[
                         {
                             "role": "system",
@@ -689,8 +794,10 @@ IMPORTANT INSTRUCTIONS:
                 # Auto-correct category based on description
                 description = extracted_data.description or "Unknown expense"
                 category = extracted_data.category or "OTHER_MISC"
-                corrected_category, corrected_expense_type, corrected_meal_type = self.auto_correct_category(
-                    description, category, extracted_data.meal_type
+                corrected_category, corrected_expense_type, corrected_meal_type = (
+                    self.auto_correct_category(
+                        description, category, extracted_data.meal_type
+                    )
                 )
 
                 return ExpenseData(
@@ -743,7 +850,7 @@ Document text:
 
         try:
             response = client.beta.chat.completions.parse(
-                model="gpt-5",
+                model="gpt-5.2",
                 messages=[
                     {
                         "role": "system",
@@ -778,8 +885,10 @@ Document text:
             # Auto-correct category based on description
             description = extracted_data.description or "Unknown expense"
             category = extracted_data.category or "OTHER_MISC"
-            corrected_category, corrected_expense_type, corrected_meal_type = self.auto_correct_category(
-                description, category, extracted_data.meal_type
+            corrected_category, corrected_expense_type, corrected_meal_type = (
+                self.auto_correct_category(
+                    description, category, extracted_data.meal_type
+                )
             )
 
             return ExpenseData(
@@ -832,7 +941,9 @@ Document text:
         event_name = self.generate_event_name_from_expenses(expenses, context)
 
         # Generate business purpose from expense descriptions
-        business_purpose = self.generate_business_purpose_from_expenses(expenses, context)
+        business_purpose = self.generate_business_purpose_from_expenses(
+            expenses, context
+        )
 
         # Get date range from expenses
         dates = [
@@ -948,7 +1059,9 @@ Document text:
             if not st.session_state.metadata.get("num_trip_legs"):
                 st.session_state.metadata["num_trip_legs"] = num_trip_legs
 
-    def generate_event_name_from_expenses(self, expenses: List[ExpenseData], context: str = "") -> str:
+    def generate_event_name_from_expenses(
+        self, expenses: List[ExpenseData], context: str = ""
+    ) -> str:
         """Generate event name from expense patterns"""
         if not expenses:
             return "Business Event"
@@ -968,7 +1081,7 @@ Document text:
             for keyword in conference_keywords:
                 if keyword in context_lower:
                     # Try to extract the event name from the sentence containing the keyword
-                    sentences = context.split('.')
+                    sentences = context.split(".")
                     for sentence in sentences:
                         if keyword in sentence.lower():
                             # Use the first 50 characters of the sentence as the event name
@@ -1091,7 +1204,7 @@ Return ONLY the business purpose statement, nothing else."""
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5",
+                model="gpt-5.2",
                 messages=[
                     {
                         "role": "system",
@@ -1100,7 +1213,6 @@ Return ONLY the business purpose statement, nothing else."""
                     {"role": "user", "content": prompt},
                 ],
                 max_completion_tokens=100,
-                temperature=0.7,
             )
 
             business_purpose = response.choices[0].message.content.strip()
@@ -1126,7 +1238,9 @@ Return ONLY the business purpose statement, nothing else."""
         # If context is provided, use it as the primary business purpose
         if context and context.strip():
             # Use the context directly, truncated to a reasonable length
-            return context.strip()[:200] if len(context.strip()) > 200 else context.strip()
+            return (
+                context.strip()[:200] if len(context.strip()) > 200 else context.strip()
+            )
 
         # Get unique descriptions (first 3)
         descriptions = list(
@@ -1232,36 +1346,55 @@ Return ONLY the business purpose statement, nothing else."""
                 trip_duration = st.selectbox(
                     "Trip Duration*",
                     options=TRIP_DURATIONS,
-                    index=TRIP_DURATIONS.index(st.session_state.metadata.get("trip_duration", TRIP_DURATIONS[0])) if st.session_state.metadata.get("trip_duration") in TRIP_DURATIONS else 0
+                    index=(
+                        TRIP_DURATIONS.index(
+                            st.session_state.metadata.get(
+                                "trip_duration", TRIP_DURATIONS[0]
+                            )
+                        )
+                        if st.session_state.metadata.get("trip_duration")
+                        in TRIP_DURATIONS
+                        else 0
+                    ),
                 )
                 num_trip_legs = st.selectbox(
                     "Number of Trip Legs*",
                     options=TRIP_LEGS,
-                    index=TRIP_LEGS.index(st.session_state.metadata.get("num_trip_legs", TRIP_LEGS[0])) if st.session_state.metadata.get("num_trip_legs") in TRIP_LEGS else 0
+                    index=(
+                        TRIP_LEGS.index(
+                            st.session_state.metadata.get("num_trip_legs", TRIP_LEGS[0])
+                        )
+                        if st.session_state.metadata.get("num_trip_legs") in TRIP_LEGS
+                        else 0
+                    ),
                 )
 
             with col2:
                 destinations = st.text_input(
                     "Trip Destination(s)*",
                     value=st.session_state.metadata.get("destinations", ""),
-                    help="City and state/country (e.g., 'Boston, MA' or 'London, UK')"
+                    help="City and state/country (e.g., 'Boston, MA' or 'London, UK')",
                 )
                 event_name = st.text_input(
                     "Event/Conference Name",
                     value=st.session_state.metadata.get("event_name", ""),
-                    help="Name of conference or event attended"
+                    help="Name of conference or event attended",
                 )
 
             col1, col2 = st.columns(2)
             with col1:
                 start_date = st.date_input(
                     "Travel Start Date*",
-                    value=st.session_state.metadata.get("start_date", datetime.now().date()),
+                    value=st.session_state.metadata.get(
+                        "start_date", datetime.now().date()
+                    ),
                 )
             with col2:
                 end_date = st.date_input(
                     "Travel End Date*",
-                    value=st.session_state.metadata.get("end_date", datetime.now().date()),
+                    value=st.session_state.metadata.get(
+                        "end_date", datetime.now().date()
+                    ),
                 )
 
             st.markdown("---")
@@ -1417,19 +1550,19 @@ Return ONLY the business purpose statement, nothing else."""
             # UC Berkeley ordered summary row
             summary_row = [
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # 1. Timestamp
-                metadata.get("first_name", ""),                 # 2. First Name
-                metadata.get("last_name", ""),                  # 3. Last Name
-                metadata.get("email", ""),                      # 4. Email
-                metadata.get("description", ""),                # 5. Business Purpose
-                metadata.get("trip_duration", ""),              # 6. Trip Duration
-                metadata.get("destinations", ""),               # 7. Destinations
-                start_date,                                     # 8. Start Date
-                end_date,                                       # 9. End Date
-                round(transport_total, 2),                      # 10. Transportation Total
-                round(misc_total, 2),                           # 11. Miscellaneous Total
-                round(meals_total, 2),                          # 12. Meals Total
-                round(lodging_total, 2),                        # 13. Lodging Total
-                round(grand_total, 2),                          # 14. Grand Total
+                metadata.get("first_name", ""),  # 2. First Name
+                metadata.get("last_name", ""),  # 3. Last Name
+                metadata.get("email", ""),  # 4. Email
+                metadata.get("description", ""),  # 5. Business Purpose
+                metadata.get("trip_duration", ""),  # 6. Trip Duration
+                metadata.get("destinations", ""),  # 7. Destinations
+                start_date,  # 8. Start Date
+                end_date,  # 9. End Date
+                round(transport_total, 2),  # 10. Transportation Total
+                round(misc_total, 2),  # 11. Miscellaneous Total
+                round(meals_total, 2),  # 12. Meals Total
+                round(lodging_total, 2),  # 13. Lodging Total
+                round(grand_total, 2),  # 14. Grand Total
             ]
 
             sheet1.append_row(summary_row)
@@ -1494,7 +1627,9 @@ Return ONLY the business purpose statement, nothing else."""
                 add_expense_row(expense, amount_usd, "DAILY - MEALS")
 
             # Add Lodging (sorted by date)
-            for expense, amount_usd in sorted(lodging_expenses, key=lambda x: x[0].date):
+            for expense, amount_usd in sorted(
+                lodging_expenses, key=lambda x: x[0].date
+            ):
                 add_expense_row(expense, amount_usd, "DAILY - LODGING")
 
             return True
@@ -1507,19 +1642,25 @@ Return ONLY the business purpose statement, nothing else."""
     def get_s3_client(self):
         """Initialize AWS S3 client"""
         try:
-            aws_access_key = st.secrets.get("AWS_ACCESS_KEY_ID") or os.getenv("AWS_ACCESS_KEY_ID")
-            aws_secret_key = st.secrets.get("AWS_SECRET_ACCESS_KEY") or os.getenv("AWS_SECRET_ACCESS_KEY")
-            aws_region = st.secrets.get("AWS_REGION") or os.getenv("AWS_REGION", "us-west-2")
+            aws_access_key = st.secrets.get("AWS_ACCESS_KEY_ID") or os.getenv(
+                "AWS_ACCESS_KEY_ID"
+            )
+            aws_secret_key = st.secrets.get("AWS_SECRET_ACCESS_KEY") or os.getenv(
+                "AWS_SECRET_ACCESS_KEY"
+            )
+            aws_region = st.secrets.get("AWS_REGION") or os.getenv(
+                "AWS_REGION", "us-west-2"
+            )
 
             if not aws_access_key or not aws_secret_key:
                 logger.error("AWS credentials not found")
                 return None
 
             return boto3.client(
-                's3',
+                "s3",
                 aws_access_key_id=aws_access_key,
                 aws_secret_access_key=aws_secret_key,
-                region_name=aws_region
+                region_name=aws_region,
             )
         except Exception as e:
             logger.error(f"Failed to initialize S3 client: {str(e)}")
@@ -1545,28 +1686,33 @@ Return ONLY the business purpose statement, nothing else."""
             for filename in sorted(files_data.keys()):
                 file_bytes = files_data[filename]
 
-                if filename.lower().endswith('.pdf'):
+                if filename.lower().endswith(".pdf"):
                     # Add PDF pages directly
                     pdf_reader = PdfReader(io.BytesIO(file_bytes))
                     for page in pdf_reader.pages:
                         pdf_writer.add_page(page)
-                    logger.info(f"Added PDF to merge: {filename} ({len(pdf_reader.pages)} pages)")
+                    logger.info(
+                        f"Added PDF to merge: {filename} ({len(pdf_reader.pages)} pages)"
+                    )
 
-                elif filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                elif filename.lower().endswith((".png", ".jpg", ".jpeg")):
                     # Convert image to PDF page
                     image = Image.open(io.BytesIO(file_bytes))
 
                     # Convert to RGB if necessary (for PNG with transparency)
-                    if image.mode in ('RGBA', 'LA', 'P'):
-                        background = Image.new('RGB', image.size, (255, 255, 255))
-                        if image.mode == 'P':
-                            image = image.convert('RGBA')
-                        background.paste(image, mask=image.split()[-1] if image.mode == 'RGBA' else None)
+                    if image.mode in ("RGBA", "LA", "P"):
+                        background = Image.new("RGB", image.size, (255, 255, 255))
+                        if image.mode == "P":
+                            image = image.convert("RGBA")
+                        background.paste(
+                            image,
+                            mask=image.split()[-1] if image.mode == "RGBA" else None,
+                        )
                         image = background
 
                     # Save image as PDF to bytes
                     img_pdf_bytes = io.BytesIO()
-                    image.save(img_pdf_bytes, 'PDF', resolution=100.0)
+                    image.save(img_pdf_bytes, "PDF", resolution=100.0)
                     img_pdf_bytes.seek(0)
 
                     # Add image PDF to writer
@@ -1579,7 +1725,9 @@ Return ONLY the business purpose statement, nothing else."""
             output = io.BytesIO()
             pdf_writer.write(output)
             output.seek(0)
-            logger.info(f"Merged {len(files_data)} files into single PDF ({len(pdf_writer.pages)} pages)")
+            logger.info(
+                f"Merged {len(files_data)} files into single PDF ({len(pdf_writer.pages)} pages)"
+            )
             return output.read()
 
         except Exception as e:
@@ -1624,7 +1772,7 @@ Return ONLY the business purpose statement, nothing else."""
                 Bucket=bucket_name,
                 Key=s3_key,
                 Body=merged_pdf,
-                ContentType='application/pdf'
+                ContentType="application/pdf",
             )
 
             logger.info(f"Uploaded merged PDF to S3: {s3_key}")
@@ -1752,7 +1900,9 @@ Return ONLY the business purpose statement, nothing else."""
             if submitted:
                 if first_name and last_name and email and event_name:
                     # Validate email domain
-                    allow_external = st.session_state.get("include_external_emails", False)
+                    allow_external = st.session_state.get(
+                        "include_external_emails", False
+                    )
                     if not self.is_valid_email(email, allow_external):
                         st.error(
                             f"⚠️ Email '{email}' is not a Berkeley email address (@berkeley.edu). "
@@ -1855,16 +2005,20 @@ Return ONLY the business purpose statement, nothing else."""
                 file.seek(0)  # Reset for processing
 
                 if len(file_content) == 0:
-                    return None, f"❌ {file.name} is empty. Please check the file and try again.", "error"
+                    return (
+                        None,
+                        f"❌ {file.name} is empty. Please check the file and try again.",
+                        "error",
+                    )
 
-                logger.info(
-                    f"Processing PDF {file.name} ({len(file_content)} bytes)"
-                )
+                logger.info(f"Processing PDF {file.name} ({len(file_content)} bytes)")
                 expense_data = self.analyze_expense_with_gpt_direct_pdf(
                     file, file.name, context
                 )
                 if expense_data:
-                    success_msg = f"✅ Processed {file.name} with GPT-5 direct PDF analysis"
+                    success_msg = (
+                        f"✅ Processed {file.name} with GPT-5 direct PDF analysis"
+                    )
                     # Add personal info to message
                     if (
                         expense_data.first_name
@@ -1894,10 +2048,7 @@ Return ONLY the business purpose statement, nothing else."""
                                 or expense_data.email
                             ):
                                 personal_parts = []
-                                if (
-                                    expense_data.first_name
-                                    or expense_data.last_name
-                                ):
+                                if expense_data.first_name or expense_data.last_name:
                                     name = f"{expense_data.first_name or ''} {expense_data.last_name or ''}".strip()
                                     personal_parts.append(f"Name: {name}")
                                 if expense_data.email:
@@ -1909,9 +2060,17 @@ Return ONLY the business purpose statement, nothing else."""
                                 )
                             return expense_data, success_msg, "success"
                         else:
-                            return None, f"❌ Failed to analyze {file.name} even with text extraction", "error"
+                            return (
+                                None,
+                                f"❌ Failed to analyze {file.name} even with text extraction",
+                                "error",
+                            )
                     else:
-                        return None, f"❌ Could not extract text from {file.name}", "error"
+                        return (
+                            None,
+                            f"❌ Could not extract text from {file.name}",
+                            "error",
+                        )
             else:
                 # For images, use GPT-5 vision directly
                 expense_data = self.analyze_expense_with_gpt_image(
@@ -1930,9 +2089,7 @@ Return ONLY the business purpose statement, nothing else."""
                             personal_parts.append(f"Name: {name}")
                         if expense_data.email:
                             personal_parts.append(f"Email: {expense_data.email}")
-                        success_msg += (
-                            f" | 📋 Extracted: {', '.join(personal_parts)}"
-                        )
+                        success_msg += f" | 📋 Extracted: {', '.join(personal_parts)}"
                     return expense_data, success_msg, "success"
                 else:
                     return None, f"❌ Failed to analyze {file.name}", "error"
@@ -2058,15 +2215,19 @@ Return ONLY the business purpose statement, nothing else."""
             corrections_made = []
             for exp in st.session_state.expenses:
                 old_category = exp.category
-                corrected_category, corrected_expense_type, corrected_meal_type = self.auto_correct_category(
-                    exp.description, exp.category, exp.meal_type
+                corrected_category, corrected_expense_type, corrected_meal_type = (
+                    self.auto_correct_category(
+                        exp.description, exp.category, exp.meal_type
+                    )
                 )
                 if corrected_category != old_category:
                     exp.category = corrected_category
                     exp.expense_type = corrected_expense_type
                     if corrected_meal_type is not None:
                         exp.meal_type = corrected_meal_type
-                    corrections_made.append(f"'{exp.description[:30]}...' → {corrected_category}")
+                    corrections_made.append(
+                        f"'{exp.description[:30]}...' → {corrected_category}"
+                    )
 
             if corrections_made:
                 st.toast(f"🔧 Auto-corrected {len(corrections_made)} expense(s)")
@@ -2104,7 +2265,10 @@ Return ONLY the business purpose statement, nothing else."""
         # Calculate totals by section
         def calc_section_total(expenses_list):
             return sum(
-                exp.amount * st.session_state.metadata.get("exchange_rates", {}).get(exp.currency, 1.0)
+                exp.amount
+                * st.session_state.metadata.get("exchange_rates", {}).get(
+                    exp.currency, 1.0
+                )
                 for _, exp in expenses_list
             )
 
@@ -2118,10 +2282,14 @@ Return ONLY the business purpose statement, nothing else."""
         duplicates = self.detect_duplicate_expenses(st.session_state.expenses)
         if duplicates:
             with st.expander("⚠️ Potential Duplicate Expenses Detected", expanded=True):
-                st.warning("The following expenses may be duplicates. Please review and delete if necessary:")
+                st.warning(
+                    "The following expenses may be duplicates. Please review and delete if necessary:"
+                )
                 for dup_group in duplicates:
                     exp1, exp2 = dup_group
-                    st.markdown(f"- **{exp1.description}** (${exp1.amount:.2f}) on {exp1.date} vs **{exp2.description}** (${exp2.amount:.2f}) on {exp2.date}")
+                    st.markdown(
+                        f"- **{exp1.description}** (${exp1.amount:.2f}) on {exp1.date} vs **{exp2.description}** (${exp2.amount:.2f}) on {exp2.date}"
+                    )
 
         # Summary by section
         st.markdown("### Summary by Section")
@@ -2141,7 +2309,11 @@ Return ONLY the business purpose statement, nothing else."""
         # Helper function to render expense editor
         def render_expense_editor(i, expense, section_prefix):
             # Determine confidence level for visual indicator
-            confidence_emoji = "✅" if expense.confidence >= 0.8 else "⚠️" if expense.confidence >= 0.5 else "❓"
+            confidence_emoji = (
+                "✅"
+                if expense.confidence >= 0.8
+                else "⚠️" if expense.confidence >= 0.5 else "❓"
+            )
             expander_label = f"{confidence_emoji} {expense.filename} - ${expense.amount:.2f} {expense.currency}"
 
             with st.expander(expander_label):
@@ -2155,16 +2327,22 @@ Return ONLY the business purpose statement, nothing else."""
                 # Receipt preview (if available)
                 if expense.filename in st.session_state.uploaded_files_data:
                     file_data = st.session_state.uploaded_files_data[expense.filename]
-                    if expense.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.gif')):
+                    if expense.filename.lower().endswith(
+                        (".png", ".jpg", ".jpeg", ".gif")
+                    ):
                         st.image(file_data, caption="Original Receipt", width=200)
-                    elif expense.filename.lower().endswith('.pdf'):
-                        st.caption(f"📎 PDF: {expense.filename} ({len(file_data):,} bytes)")
+                    elif expense.filename.lower().endswith(".pdf"):
+                        st.caption(
+                            f"📎 PDF: {expense.filename} ({len(file_data):,} bytes)"
+                        )
 
                 col1, col2 = st.columns(2)
 
                 with col1:
                     new_description = st.text_input(
-                        "Description", value=expense.description, key=f"{section_prefix}_desc_{i}"
+                        "Description",
+                        value=expense.description,
+                        key=f"{section_prefix}_desc_{i}",
                     )
                     new_amount = st.number_input(
                         "Amount",
@@ -2177,8 +2355,11 @@ Return ONLY the business purpose statement, nothing else."""
                         "Currency",
                         options=st.session_state.metadata.get("currencies", ["USD"]),
                         index=(
-                            st.session_state.metadata.get("currencies", ["USD"]).index(expense.currency)
-                            if expense.currency in st.session_state.metadata.get("currencies", ["USD"])
+                            st.session_state.metadata.get("currencies", ["USD"]).index(
+                                expense.currency
+                            )
+                            if expense.currency
+                            in st.session_state.metadata.get("currencies", ["USD"])
                             else 0
                         ),
                         key=f"{section_prefix}_currency_{i}",
@@ -2201,12 +2382,20 @@ Return ONLY the business purpose statement, nothing else."""
                         key=f"{section_prefix}_category_{i}",
                     )
 
-                    exchange_rate = st.session_state.metadata.get("exchange_rates", {}).get(new_currency, 1.0)
+                    exchange_rate = st.session_state.metadata.get(
+                        "exchange_rates", {}
+                    ).get(new_currency, 1.0)
                     amount_usd = new_amount * exchange_rate
-                    st.info(f"Confidence: {expense.confidence:.1%} | USD: ${amount_usd:.2f}")
+                    st.info(
+                        f"Confidence: {expense.confidence:.1%} | USD: ${amount_usd:.2f}"
+                    )
 
                 # Delete button
-                if st.button(f"🗑️ Delete this expense", key=f"{section_prefix}_delete_{i}", type="secondary"):
+                if st.button(
+                    f"🗑️ Delete this expense",
+                    key=f"{section_prefix}_delete_{i}",
+                    type="secondary",
+                ):
                     st.session_state.expenses.pop(i)
                     st.success("Expense deleted!")
                     st.rerun()
@@ -2256,12 +2445,18 @@ Return ONLY the business purpose statement, nothing else."""
             meals_by_date = {}
             for _, expense in meal_expenses:
                 date = expense.date
-                exchange_rate = st.session_state.metadata.get("exchange_rates", {}).get(expense.currency, 1.0)
+                exchange_rate = st.session_state.metadata.get("exchange_rates", {}).get(
+                    expense.currency, 1.0
+                )
                 amount_usd = expense.amount * exchange_rate
                 meals_by_date[date] = meals_by_date.get(date, 0) + amount_usd
 
             # Show warning for dates over limit
-            dates_over_limit = [(date, total) for date, total in meals_by_date.items() if total > FEDERAL_DAILY_MEAL_LIMIT]
+            dates_over_limit = [
+                (date, total)
+                for date, total in meals_by_date.items()
+                if total > FEDERAL_DAILY_MEAL_LIMIT
+            ]
             if dates_over_limit:
                 with st.expander("⚠️ Daily Meal Limits Exceeded", expanded=True):
                     st.warning(
@@ -2270,7 +2465,9 @@ Return ONLY the business purpose statement, nothing else."""
                     )
                     for date, total in sorted(dates_over_limit):
                         over_by = total - FEDERAL_DAILY_MEAL_LIMIT
-                        st.markdown(f"- **{date}**: ${total:.2f} (${over_by:.2f} over limit)")
+                        st.markdown(
+                            f"- **{date}**: ${total:.2f} (${over_by:.2f} over limit)"
+                        )
 
             # Sort by date
             meal_expenses_sorted = sorted(meal_expenses, key=lambda x: x[1].date)
@@ -2300,42 +2497,29 @@ Return ONLY the business purpose statement, nothing else."""
                 with col1:
                     manual_description = st.text_input(
                         "Description*",
-                        placeholder="e.g., Mileage to airport, Tips for hotel staff"
+                        placeholder="e.g., Mileage to airport, Tips for hotel staff",
                     )
                     manual_amount = st.number_input(
-                        "Amount*",
-                        min_value=0.0,
-                        step=0.01,
-                        format="%.2f"
+                        "Amount*", min_value=0.0, step=0.01, format="%.2f"
                     )
                     manual_currency = st.selectbox(
-                        "Currency",
-                        options=CURRENCY_OPTIONS,
-                        index=0
+                        "Currency", options=CURRENCY_OPTIONS, index=0
                     )
 
                 with col2:
-                    manual_date = st.date_input(
-                        "Date*",
-                        value=datetime.now().date()
-                    )
+                    manual_date = st.date_input("Date*", value=datetime.now().date())
                     # Category selection with all options
                     category_options = list(EXPENSE_CATEGORIES.values())
                     manual_category = st.selectbox(
-                        "Category*",
-                        options=category_options
+                        "Category*", options=category_options
                     )
                     # Show meal type if meal is selected
                     manual_meal_type = None
                     if manual_category == "Meal":
-                        manual_meal_type = st.selectbox(
-                            "Meal Type",
-                            options=MEAL_TYPES
-                        )
+                        manual_meal_type = st.selectbox("Meal Type", options=MEAL_TYPES)
 
                 manual_destination = st.text_input(
-                    "Destination (optional)",
-                    placeholder="e.g., Boston, MA"
+                    "Destination (optional)", placeholder="e.g., Boston, MA"
                 )
 
                 add_manual = st.form_submit_button("➕ Add Expense", type="primary")
@@ -2358,10 +2542,14 @@ Return ONLY the business purpose statement, nothing else."""
                             category=cat_key or manual_category,
                             confidence=1.0,
                             meal_type=manual_meal_type,
-                            destination=manual_destination if manual_destination else None,
+                            destination=(
+                                manual_destination if manual_destination else None
+                            ),
                         )
                         st.session_state.expenses.append(new_expense)
-                        st.success(f"✅ Added: {manual_description} - ${manual_amount:.2f}")
+                        st.success(
+                            f"✅ Added: {manual_description} - ${manual_amount:.2f}"
+                        )
                         st.rerun()
                     else:
                         st.error("Please fill in description and amount")
@@ -2397,7 +2585,9 @@ Return ONLY the business purpose statement, nothing else."""
         lodging_total = 0.0
 
         for expense in expenses:
-            exchange_rate = metadata.get("exchange_rates", {}).get(expense.currency, 1.0)
+            exchange_rate = metadata.get("exchange_rates", {}).get(
+                expense.currency, 1.0
+            )
             amount_usd = expense.amount * exchange_rate
 
             cat_key = None
@@ -2434,14 +2624,18 @@ Return ONLY the business purpose statement, nothing else."""
 
         # === COPY-PASTE FRIENDLY PREVIEW ===
         st.subheader("📋 UC Berkeley Travel Reimbursement Preview")
-        st.caption("Copy this text directly into the UC Berkeley Travel Reimbursement form")
+        st.caption(
+            "Copy this text directly into the UC Berkeley Travel Reimbursement form"
+        )
 
         # Build the copy-paste text
         preview_lines = []
 
         # TRAVELER INFO
         preview_lines.append("=== TRAVELER INFO ===")
-        preview_lines.append(f"Name: {metadata.get('first_name', '')} {metadata.get('last_name', '')}")
+        preview_lines.append(
+            f"Name: {metadata.get('first_name', '')} {metadata.get('last_name', '')}"
+        )
         preview_lines.append(f"Email: {metadata.get('email', '')}")
         preview_lines.append("")
 
@@ -2451,7 +2645,7 @@ Return ONLY the business purpose statement, nothing else."""
         preview_lines.append(f"Trip Duration: {metadata.get('trip_duration', '')}")
         preview_lines.append(f"Destinations: {metadata.get('destinations', '')}")
         preview_lines.append(f"Travel Dates: {start_date} - {end_date}")
-        if metadata.get('event_name'):
+        if metadata.get("event_name"):
             preview_lines.append(f"Event/Conference: {metadata.get('event_name', '')}")
         preview_lines.append("")
 
@@ -2496,7 +2690,9 @@ Return ONLY the business purpose statement, nothing else."""
 
             for date in sorted(meals_by_date.keys()):
                 meal_info = meals_by_date[date]
-                types_str = f" ({', '.join(meal_info['types'])})" if meal_info['types'] else ""
+                types_str = (
+                    f" ({', '.join(meal_info['types'])})" if meal_info["types"] else ""
+                )
                 preview_lines.append(f"  {date}: ${meal_info['total']:.2f}{types_str}")
             preview_lines.append(f"  Subtotal: ${meals_total:.2f}")
         else:
@@ -2534,7 +2730,7 @@ Return ONLY the business purpose statement, nothing else."""
             "Copy-Paste Preview",
             value=preview_text,
             height=500,
-            help="Select all (Ctrl+A / Cmd+A) and copy this text to paste into the UC Berkeley form"
+            help="Select all (Ctrl+A / Cmd+A) and copy this text to paste into the UC Berkeley form",
         )
 
         st.markdown("---")
@@ -2585,12 +2781,16 @@ Return ONLY the business purpose statement, nothing else."""
                     # Upload files to AWS S3
                     if st.session_state.uploaded_files_data:
                         with st.spinner("Uploading files to S3..."):
-                            s3_success, uploaded_count, s3_error = self.upload_files_to_s3(
-                                st.session_state.uploaded_files_data
+                            s3_success, uploaded_count, s3_error = (
+                                self.upload_files_to_s3(
+                                    st.session_state.uploaded_files_data
+                                )
                             )
 
                             if s3_success and uploaded_count > 0:
-                                st.success(f"📁 {uploaded_count} file(s) merged into single PDF and uploaded to S3!")
+                                st.success(
+                                    f"📁 {uploaded_count} file(s) merged into single PDF and uploaded to S3!"
+                                )
                             elif not s3_success:
                                 st.warning(f"📁 S3 upload failed: {s3_error}")
 
@@ -2718,7 +2918,7 @@ Return ONLY the business purpose statement, nothing else."""
                     }
                 </script>
                 """,
-                height=0
+                height=0,
             )
 
         tab1, tab2, tab3 = st.tabs(["📎 Upload & Event Info", "📊 Review", "🚀 Submit"])
