@@ -261,8 +261,6 @@ class ExpenseReportApp:
             st.session_state.auto_correction_done = False
         if "submission_success" not in st.session_state:
             st.session_state.submission_success = False
-        if "stay_on_submit_tab" not in st.session_state:
-            st.session_state.stay_on_submit_tab = False
         if "s3_upload_message" not in st.session_state:
             st.session_state.s3_upload_message = None
         logger.info("Session state setup complete")
@@ -1480,9 +1478,7 @@ Return ONLY the business purpose statement, nothing else."""
                         "median_date": median_date.strftime("%Y-%m-%d"),
                     }
 
-                    st.session_state.switch_to_review = True
-                    st.toast("✅ Travel information saved!")
-                    st.rerun()
+                    st.toast("✅ Travel information saved! Go to the Review tab to check your expenses.")
 
     def submit_to_google_sheets(
         self, expenses: List[ExpenseData], metadata: Dict
@@ -1837,11 +1833,9 @@ Return ONLY the business purpose statement, nothing else."""
             st.session_state.metadata = {}
             st.session_state.processing_complete = False
             st.session_state.show_event_info = False
-            st.session_state.switch_to_review = False
             st.session_state.uploaded_files_data = {}
             st.session_state.auto_correction_done = False
             st.session_state.submission_success = False
-            st.session_state.stay_on_submit_tab = False
             st.session_state.s3_upload_message = None
             st.rerun()
 
@@ -2783,38 +2777,44 @@ Return ONLY the business purpose statement, nothing else."""
             st.success("✅ Data successfully submitted to both Sheet1 and Details!")
             if st.session_state.get("s3_upload_message"):
                 st.success(st.session_state.s3_upload_message)
-            st.balloons()
+            st.info("Click '🔄 Start New Report' below to submit another expense report.")
+        else:
+            # Use a form to prevent tab switching on submit
+            with st.form("submit_form", clear_on_submit=False):
+                submitted = st.form_submit_button(
+                    "📤 Submit to Google Sheets", type="primary", use_container_width=True
+                )
 
-        if not st.session_state.get("submission_success", False):
-            if st.button(
-                "📤 Submit to Google Sheets", type="primary", use_container_width=True
-            ):
-                with st.spinner("Submitting to Sheet1 and Details sheet..."):
-                    success = self.submit_to_google_sheets(
-                        st.session_state.expenses, st.session_state.metadata
-                    )
-
-                    if success:
-                        st.session_state.submission_success = True
-                        st.session_state.stay_on_submit_tab = True
-
-                        # Upload files to AWS S3
-                        if st.session_state.uploaded_files_data:
-                            with st.spinner("Uploading files to S3..."):
-                                s3_success, uploaded_count, s3_error = (
-                                    self.upload_files_to_s3(
-                                        st.session_state.uploaded_files_data
-                                    )
-                                )
-
-                                if s3_success and uploaded_count > 0:
-                                    st.session_state.s3_upload_message = f"📁 {uploaded_count} file(s) merged into single PDF and uploaded to S3!"
-                                elif not s3_success:
-                                    st.warning(f"📁 S3 upload failed: {s3_error}")
-                    else:
-                        st.error(
-                            "❌ Failed to submit data. Please check your configuration."
+                if submitted:
+                    with st.spinner("Submitting to Sheet1 and Details sheet..."):
+                        success = self.submit_to_google_sheets(
+                            st.session_state.expenses, st.session_state.metadata
                         )
+
+                        if success:
+                            st.session_state.submission_success = True
+                            st.success("✅ Data successfully submitted to both Sheet1 and Details!")
+
+                            # Upload files to AWS S3
+                            if st.session_state.uploaded_files_data:
+                                with st.spinner("Uploading files to S3..."):
+                                    s3_success, uploaded_count, s3_error = (
+                                        self.upload_files_to_s3(
+                                            st.session_state.uploaded_files_data
+                                        )
+                                    )
+
+                                    if s3_success and uploaded_count > 0:
+                                        st.session_state.s3_upload_message = f"📁 {uploaded_count} file(s) merged into single PDF and uploaded to S3!"
+                                        st.success(st.session_state.s3_upload_message)
+                                    elif not s3_success:
+                                        st.warning(f"📁 S3 upload failed: {s3_error}")
+
+                            st.balloons()
+                        else:
+                            st.error(
+                                "❌ Failed to submit data. Please check your configuration."
+                            )
 
         # Start over option
         st.markdown("---")
@@ -2823,14 +2823,12 @@ Return ONLY the business purpose statement, nothing else."""
             st.session_state.metadata = {}
             st.session_state.processing_complete = False
             st.session_state.show_event_info = False
-            st.session_state.switch_to_review = False
             st.session_state.additional_context = ""
             st.session_state.include_external_emails = False
             st.session_state.use_ai_business_purpose = False
             st.session_state.uploaded_files_data = {}
             st.session_state.auto_correction_done = False
             st.session_state.submission_success = False
-            st.session_state.stay_on_submit_tab = False
             st.session_state.s3_upload_message = None
             st.rerun()
 
@@ -2924,37 +2922,6 @@ Return ONLY the business purpose statement, nothing else."""
         # Main content area - simplified tabs without Event Info
         logger.info("Creating tabs")
 
-        # Auto-switch to Review tab after saving travel info
-        if st.session_state.get("switch_to_review"):
-            st.session_state.switch_to_review = False
-            components.html(
-                """
-                <script>
-                    // Click on the Review tab (second tab, index 1)
-                    const tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
-                    if (tabs.length >= 2) {
-                        tabs[1].click();
-                    }
-                </script>
-                """,
-                height=0,
-            )
-
-        # Stay on Submit tab after successful submission
-        if st.session_state.get("stay_on_submit_tab"):
-            st.session_state.stay_on_submit_tab = False
-            components.html(
-                """
-                <script>
-                    // Click on the Submit tab (third tab, index 2)
-                    const tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
-                    if (tabs.length >= 3) {
-                        tabs[2].click();
-                    }
-                </script>
-                """,
-                height=0,
-            )
 
         tab1, tab2, tab3 = st.tabs(["📎 Upload & Event Info", "📊 Review", "🚀 Submit"])
 
