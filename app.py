@@ -259,6 +259,8 @@ class ExpenseReportApp:
             st.session_state.uploaded_files_data = {}
         if "auto_correction_done" not in st.session_state:
             st.session_state.auto_correction_done = False
+        if "submission_success" not in st.session_state:
+            st.session_state.submission_success = False
         logger.info("Session state setup complete")
 
     def is_valid_email(self, email: str, allow_external: bool = False) -> bool:
@@ -1948,26 +1950,29 @@ Return ONLY the business purpose statement, nothing else."""
 
         # Additional context text area
         st.markdown("#### 📝 Additional Context (Optional)")
-        st.session_state.additional_context = st.text_area(
+        st.text_area(
             "Provide any additional details about this trip or event",
             value=st.session_state.additional_context,
             placeholder="Example: Attended the Annual Economics Conference in Boston. Met with research collaborators from MIT and Harvard to discuss ongoing project on behavioral finance...",
             help="This information helps the AI better understand the purpose of your expenses and generate more accurate business purpose descriptions.",
             height=100,
+            key="additional_context",
         )
 
         # Email privacy settings
-        st.session_state.include_external_emails = st.checkbox(
+        st.checkbox(
             "Include external guest/speaker expenses (allows non-Berkeley emails)",
             value=st.session_state.include_external_emails,
             help="By default, only @berkeley.edu emails are extracted to protect privacy. Check this if submitting expenses for external speakers or guests from other universities.",
+            key="include_external_emails",
         )
 
         # AI business purpose toggle
-        st.session_state.use_ai_business_purpose = st.checkbox(
+        st.checkbox(
             "🤖 Use AI to generate compliant business purpose (slower, more accurate)",
             value=st.session_state.use_ai_business_purpose,
             help="Enable this to use AI (GPT-5) to generate a UC Berkeley-compliant business purpose. Disabled by default for faster processing.",
+            key="use_ai_business_purpose",
         )
 
         uploaded_files = st.file_uploader(
@@ -2765,40 +2770,44 @@ Return ONLY the business purpose statement, nothing else."""
         """
         )
 
-        if st.button(
-            "📤 Submit to Google Sheets", type="primary", use_container_width=True
-        ):
-            with st.spinner("Submitting to Sheet1 and Details sheet..."):
-                success = self.submit_to_google_sheets(
-                    st.session_state.expenses, st.session_state.metadata
-                )
+        # Show success message if already submitted
+        if st.session_state.get("submission_success", False):
+            st.success("✅ Data successfully submitted to both Sheet1 and Details!")
+            if st.session_state.get("s3_upload_message"):
+                st.success(st.session_state.s3_upload_message)
+            st.balloons()
 
-                if success:
-                    st.success(
-                        "✅ Data successfully submitted to both Sheet1 and Details!"
+        if not st.session_state.get("submission_success", False):
+            if st.button(
+                "📤 Submit to Google Sheets", type="primary", use_container_width=True
+            ):
+                with st.spinner("Submitting to Sheet1 and Details sheet..."):
+                    success = self.submit_to_google_sheets(
+                        st.session_state.expenses, st.session_state.metadata
                     )
 
-                    # Upload files to AWS S3
-                    if st.session_state.uploaded_files_data:
-                        with st.spinner("Uploading files to S3..."):
-                            s3_success, uploaded_count, s3_error = (
-                                self.upload_files_to_s3(
-                                    st.session_state.uploaded_files_data
-                                )
-                            )
+                    if success:
+                        st.session_state.submission_success = True
 
-                            if s3_success and uploaded_count > 0:
-                                st.success(
-                                    f"📁 {uploaded_count} file(s) merged into single PDF and uploaded to S3!"
+                        # Upload files to AWS S3
+                        if st.session_state.uploaded_files_data:
+                            with st.spinner("Uploading files to S3..."):
+                                s3_success, uploaded_count, s3_error = (
+                                    self.upload_files_to_s3(
+                                        st.session_state.uploaded_files_data
+                                    )
                                 )
-                            elif not s3_success:
-                                st.warning(f"📁 S3 upload failed: {s3_error}")
 
-                    st.balloons()
-                else:
-                    st.error(
-                        "❌ Failed to submit data. Please check your configuration."
-                    )
+                                if s3_success and uploaded_count > 0:
+                                    st.session_state.s3_upload_message = f"📁 {uploaded_count} file(s) merged into single PDF and uploaded to S3!"
+                                elif not s3_success:
+                                    st.warning(f"📁 S3 upload failed: {s3_error}")
+
+                        st.rerun()
+                    else:
+                        st.error(
+                            "❌ Failed to submit data. Please check your configuration."
+                        )
 
         # Start over option
         st.markdown("---")
@@ -2813,7 +2822,9 @@ Return ONLY the business purpose statement, nothing else."""
             st.session_state.use_ai_business_purpose = False
             st.session_state.uploaded_files_data = {}
             st.session_state.auto_correction_done = False
-            # Streamlit will automatically rerun after state changes
+            st.session_state.submission_success = False
+            st.session_state.s3_upload_message = None
+            st.rerun()
 
     def render_progress_indicator(self):
         """Render a visual progress indicator showing the user's current step"""
