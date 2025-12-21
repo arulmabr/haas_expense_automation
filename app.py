@@ -261,6 +261,10 @@ class ExpenseReportApp:
             st.session_state.auto_correction_done = False
         if "submission_success" not in st.session_state:
             st.session_state.submission_success = False
+        if "stay_on_submit_tab" not in st.session_state:
+            st.session_state.stay_on_submit_tab = False
+        if "s3_upload_message" not in st.session_state:
+            st.session_state.s3_upload_message = None
         logger.info("Session state setup complete")
 
     def is_valid_email(self, email: str, allow_external: bool = False) -> bool:
@@ -1835,7 +1839,11 @@ Return ONLY the business purpose statement, nothing else."""
             st.session_state.show_event_info = False
             st.session_state.switch_to_review = False
             st.session_state.uploaded_files_data = {}
-            # Streamlit will automatically rerun after state changes
+            st.session_state.auto_correction_done = False
+            st.session_state.submission_success = False
+            st.session_state.stay_on_submit_tab = False
+            st.session_state.s3_upload_message = None
+            st.rerun()
 
     def render_metadata_form(self):
         """Render the metadata collection form"""
@@ -2788,6 +2796,7 @@ Return ONLY the business purpose statement, nothing else."""
 
                     if success:
                         st.session_state.submission_success = True
+                        st.session_state.stay_on_submit_tab = True
 
                         # Upload files to AWS S3
                         if st.session_state.uploaded_files_data:
@@ -2802,8 +2811,6 @@ Return ONLY the business purpose statement, nothing else."""
                                     st.session_state.s3_upload_message = f"📁 {uploaded_count} file(s) merged into single PDF and uploaded to S3!"
                                 elif not s3_success:
                                     st.warning(f"📁 S3 upload failed: {s3_error}")
-
-                        st.rerun()
                     else:
                         st.error(
                             "❌ Failed to submit data. Please check your configuration."
@@ -2823,6 +2830,7 @@ Return ONLY the business purpose statement, nothing else."""
             st.session_state.uploaded_files_data = {}
             st.session_state.auto_correction_done = False
             st.session_state.submission_success = False
+            st.session_state.stay_on_submit_tab = False
             st.session_state.s3_upload_message = None
             st.rerun()
 
@@ -2926,6 +2934,22 @@ Return ONLY the business purpose statement, nothing else."""
                     const tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
                     if (tabs.length >= 2) {
                         tabs[1].click();
+                    }
+                </script>
+                """,
+                height=0,
+            )
+
+        # Stay on Submit tab after successful submission
+        if st.session_state.get("stay_on_submit_tab"):
+            st.session_state.stay_on_submit_tab = False
+            components.html(
+                """
+                <script>
+                    // Click on the Submit tab (third tab, index 2)
+                    const tabs = window.parent.document.querySelectorAll('button[data-baseweb="tab"]');
+                    if (tabs.length >= 3) {
+                        tabs[2].click();
                     }
                 </script>
                 """,
