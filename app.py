@@ -376,147 +376,41 @@ class ExpenseReportApp:
     def auto_correct_category(
         self, description: str, category: str, meal_type: Optional[str]
     ) -> tuple:
-        """Auto-correct category based on description keywords when AI makes obvious mistakes"""
-        desc_lower = description.lower()
+        """
+        Minimal validation of category - relies on GPT for proper categorization.
+        Only maps category to expense_type for grouping purposes.
+        """
+        # Normalize category to match expected values
+        category_mapping = {
+            "MEAL": ("Meal", "DAILY"),
+            "Meal": ("Meal", "DAILY"),
+            "LODGING": ("Lodging", "DAILY"),
+            "Lodging": ("Lodging", "DAILY"),
+            "AIRFARE": ("Airfare", "TRANSPORTATION"),
+            "Airfare": ("Airfare", "TRANSPORTATION"),
+            "AIRFARE_CHANGE_FEE": ("Airfare Change Fee", "TRANSPORTATION"),
+            "Airfare Change Fee": ("Airfare Change Fee", "TRANSPORTATION"),
+            "RENTAL_CAR": ("Rental Car", "TRANSPORTATION"),
+            "Rental Car": ("Rental Car", "TRANSPORTATION"),
+            "PERSONAL_VEHICLE": ("Personal Vehicle", "TRANSPORTATION"),
+            "Personal Vehicle": ("Personal Vehicle", "TRANSPORTATION"),
+            "GROUND_TRANSPORT": ("Other Ground Transportation", "TRANSPORTATION"),
+            "Other Ground Transportation": ("Other Ground Transportation", "TRANSPORTATION"),
+            "CONFERENCE_FEE": ("Conference/Event Registration", "MISCELLANEOUS"),
+            "Conference/Event Registration": ("Conference/Event Registration", "MISCELLANEOUS"),
+            "SUPPLIES": ("Business Meeting Supplies", "MISCELLANEOUS"),
+            "Business Meeting Supplies": ("Business Meeting Supplies", "MISCELLANEOUS"),
+            "OTHER_MISC": ("Other Business Expenses", "MISCELLANEOUS"),
+            "Other Business Expenses": ("Other Business Expenses", "MISCELLANEOUS"),
+        }
 
-        # Keywords that indicate flights (should stay as AIRFARE, don't correct)
-        flight_keywords = [
-            "flight",
-            "airfare",
-            "airline",
-            "boarding",
-            "united",
-            "delta",
-            "american airlines",
-            "southwest",
-            "jetblue",
-            "alaska air",
-            "spirit",
-            "frontier",
-            "sfo",
-            "lax",
-            "jfk",
-            "ord",
-            "departure",
-            "arrival",
-        ]
+        if category in category_mapping:
+            normalized_category, expense_type = category_mapping[category]
+            return normalized_category, expense_type, meal_type
 
-        # Keywords that indicate meals
-        meal_keywords = [
-            "meal",
-            "restaurant",
-            "food",
-            "cafe",
-            "bar",
-            "kitchen",
-            "dining",
-            "breakfast",
-            "lunch",
-            "dinner",
-            "coffee",
-            "starbucks",
-            "mcdonalds",
-            "burger",
-            "pizza",
-            "sandwich",
-            "grill",
-            "bistro",
-            "eatery",
-            "deli",
-        ]
-
-        # Keywords that indicate lodging
-        lodging_keywords = [
-            "hotel",
-            "motel",
-            "inn",
-            "airbnb",
-            "marriott",
-            "hilton",
-            "hyatt",
-            "resort",
-            "accommodation",
-            "lodging",
-            "stay",
-            "room rate",
-        ]
-
-        # Keywords that indicate ground transport
-        transport_keywords = [
-            "uber",
-            "lyft",
-            "taxi",
-            "cab",
-            "train",
-            "metro",
-            "subway",
-            "bus",
-        ]
-
-        # If it's a flight, keep it as AIRFARE (don't auto-correct)
-        if any(kw in desc_lower for kw in flight_keywords):
-            if category in [
-                "AIRFARE",
-                "Airfare",
-                "AIRFARE_CHANGE_FEE",
-                "Airfare Change Fee",
-            ]:
-                return category, "TRANSPORTATION", None
-            # If AI miscategorized a flight, correct it to Airfare
-            logger.info(
-                f"Auto-correcting category from {category} to Airfare for: {description}"
-            )
-            return "Airfare", "TRANSPORTATION", None
-
-        # Check for meal indicators (but not if it's a flight)
-        if any(kw in desc_lower for kw in meal_keywords):
-            if category not in ["MEAL", "Meal"]:
-                logger.info(
-                    f"Auto-correcting category from {category} to Meal for: {description}"
-                )
-                return "Meal", "DAILY", meal_type
-
-        # Check for lodging indicators
-        if any(kw in desc_lower for kw in lodging_keywords):
-            if category not in ["LODGING", "Lodging"]:
-                logger.info(
-                    f"Auto-correcting category from {category} to Lodging for: {description}"
-                )
-                return "Lodging", "DAILY", None
-
-        # Check for ground transport indicators (but not for hotels that might mention these)
-        if any(kw in desc_lower for kw in transport_keywords) and not any(
-            kw in desc_lower for kw in lodging_keywords
-        ):
-            if category not in ["GROUND_TRANSPORT", "Other Ground Transportation"]:
-                logger.info(
-                    f"Auto-correcting category from {category} to Ground Transport for: {description}"
-                )
-                return "Other Ground Transportation", "TRANSPORTATION", None
-
-        # Return original if no correction needed
-        expense_type = (
-            "DAILY"
-            if category in ["MEAL", "Meal", "LODGING", "Lodging"]
-            else (
-                "TRANSPORTATION"
-                if category
-                in [
-                    "AIRFARE",
-                    "Airfare",
-                    "AIRFARE_CHANGE_FEE",
-                    "Airfare Change Fee",
-                    "RENTAL_CAR",
-                    "Rental Car",
-                    "PERSONAL_VEHICLE",
-                    "Personal Vehicle",
-                    "GROUND_TRANSPORT",
-                    "Other Ground Transportation",
-                ]
-                else "MISCELLANEOUS"
-            )
-        )
-        return category, expense_type, meal_type
+        # Default to miscellaneous if category not recognized
+        logger.warning(f"Unrecognized category '{category}' for: {description}")
+        return "Other Business Expenses", "MISCELLANEOUS", meal_type
 
     def get_expense_analysis_prompt(self, context: str = "") -> str:
         """Get the standard expense analysis prompt for GPT - aligned with UC Berkeley Travel Reimbursement"""
@@ -526,55 +420,63 @@ This is for UC Berkeley's Travel Reimbursement system.
 REQUIRED FIELDS:
 1. amount: the total amount paid (as a number, no currency symbols)
 2. currency: the currency code (USD, EUR, CAD, etc.) - default to USD if unclear
-3. description: a brief description of what this expense is for (e.g., "Flight SFO to Boston", "Hotel in Boston", "Uber to airport")
+3. description: a brief description of what this expense is for
 4. date: the transaction date in YYYY-MM-DD format. For hotels, use the check-in date
 5. category: categorize into ONE of these EXACT UC Berkeley categories:
 
-   TRANSPORTATION (for Location Expenses):
-   - "AIRFARE" - flights, airline tickets
+   *** CATEGORIZATION PRIORITY (check in this order) ***
+
+   FIRST - Check if it's FOOD/DINING (category="MEAL"):
+   - Any restaurant, cafe, bar, coffee shop, fast food, food court
+   - Any food or beverage purchase
+   - Credit card transactions at eating establishments
+   - Includes: breakfast, lunch, dinner, snacks, drinks
+   - Even if purchased during travel, food is ALWAYS "MEAL", never transportation
+
+   SECOND - Check if it's LODGING (category="LODGING"):
+   - Hotels, motels, Airbnb, hostels, any overnight accommodation
+
+   THIRD - Check if it's a MEMBERSHIP/REGISTRATION FEE (category="CONFERENCE_FEE"):
+   - Professional association memberships
+   - Conference registration fees
+   - Event registration fees
+   - Society dues or memberships
+
+   FOURTH - Check if it's TRANSPORTATION:
+   - "AIRFARE" - ONLY for airline flights and tickets
    - "AIRFARE_CHANGE_FEE" - flight change/cancellation fees
-   - "RENTAL_CAR" - car rentals
+   - "RENTAL_CAR" - car rentals only
    - "PERSONAL_VEHICLE" - mileage, gas for personal car
    - "GROUND_TRANSPORT" - taxi, Uber, Lyft, train, bus, parking, tolls
 
-   MISCELLANEOUS (for Location Expenses):
-   - "CONFERENCE_FEE" - conference/event registration fees
+   FIFTH - Everything else:
    - "SUPPLIES" - business meeting supplies
    - "OTHER_MISC" - other business expenses
-
-   DAILY EXPENSES:
-   - "MEAL" - food, restaurants, cafes, bars, coffee shops, fast food, dining, any food/beverage purchase
-   - "LODGING" - hotels, motels, Airbnb, accommodation
 
 6. confidence: a confidence score from 0.0 to 1.0
 
 7. expense_type: classify as one of:
-   - "TRANSPORTATION" - for airfare, car rental, ground transport
-   - "MISCELLANEOUS" - for conference fees, supplies, other
    - "DAILY" - for meals and lodging
+   - "MISCELLANEOUS" - for conference fees, supplies, other
+   - "TRANSPORTATION" - for airfare, car rental, ground transport
 
 8. meal_type (only for MEAL category): one of "BREAKFAST", "LUNCH", "DINNER", or "INCIDENTAL"
-   - Infer from time of day or description if possible
-   - Set to null if not a meal
 
-9. destination: Extract the city/location for this expense (e.g., "Boston", "New York", "San Francisco")
-   - Look for destination cities in flight itineraries
-   - Look for hotel/restaurant locations
-   - Set to null if unclear
+9. destination: Extract the city/location for this expense
 
 PERSONAL INFORMATION (extract if visible):
-10. first_name: Extract from passenger name, guest name, cardholder, email headers
+10. first_name: Extract from passenger name, guest name, cardholder
 11. last_name: Extract from same locations
-12. email: Extract any email address visible on the document
+12. email: Extract any email address visible
 
-IMPORTANT INSTRUCTIONS:
-- For flights: extract destination city, use departure date, category=AIRFARE
-- For hotels: use check-in date, extract city, category=LODGING
-- For meals/restaurants/food: category=MEAL, try to determine meal_type from time or context
-- For Uber/Lyft/taxi: category=GROUND_TRANSPORT
-- CRITICAL: If description contains "meal", "restaurant", "food", "cafe", "bar", "kitchen", "dining", "breakfast", "lunch", "dinner" - it MUST be category=MEAL
-- THOROUGHLY scan for names and emails in headers, customer info, etc.
-- Return ONLY valid JSON with these fields, nothing else."""
+CRITICAL CATEGORIZATION RULES:
+- Food/restaurant purchases are ALWAYS "MEAL", even if they appear on a travel day
+- Professional memberships (like ASA, IEEE, ACM) are "CONFERENCE_FEE", not transportation
+- Only actual flights are "AIRFARE" - not food bought at airports
+- When in doubt about food vs other: choose "MEAL"
+- When in doubt about membership vs other: choose "CONFERENCE_FEE"
+
+Return ONLY valid JSON with these fields, nothing else."""
 
         if context and context.strip():
             context_addition = f"\n\nADDITIONAL CONTEXT PROVIDED BY USER:\n{context.strip()}\n\nUse this context to better understand the purpose and nature of the expenses, but still extract the specific details from the document itself."
