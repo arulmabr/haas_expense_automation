@@ -263,6 +263,10 @@ class ExpenseReportApp:
             st.session_state.submission_success = False
         if "s3_upload_message" not in st.session_state:
             st.session_state.s3_upload_message = None
+        if "s3_presigned_url" not in st.session_state:
+            st.session_state.s3_presigned_url = None
+        if "merged_pdf_bytes" not in st.session_state:
+            st.session_state.merged_pdf_bytes = None
         logger.info("Session state setup complete")
 
     def is_valid_email(self, email: str, allow_external: bool = False) -> bool:
@@ -1638,33 +1642,35 @@ Return ONLY the business purpose statement, nothing else."""
             logger.error(f"Failed to merge files to PDF: {str(e)}")
             return None
 
-    def upload_files_to_s3(self, files_data: Dict[str, bytes]) -> tuple:
+    def upload_files_to_s3(self, files_data: Dict[str, bytes], merged_pdf: bytes = None) -> tuple:
         """
-        Merge all files into a single PDF and upload to AWS S3.
+        Upload merged PDF to AWS S3. Uses pre-generated merged_pdf if provided, otherwise generates it.
 
         Args:
             files_data: dict of {filename: bytes}
+            merged_pdf: Optional pre-generated merged PDF bytes
 
         Returns:
-            (success: bool, uploaded_count: int, error_message: str or None)
+            (success: bool, uploaded_count: int, error_message: str or None, s3_key: str or None, merged_pdf: bytes or None)
         """
-        if not files_data:
-            return True, 0, None
+        if not files_data and not merged_pdf:
+            return True, 0, None, None, None
 
         # Get bucket name from secrets
         bucket_name = st.secrets.get("S3_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME")
         if not bucket_name:
             logger.info("S3 bucket not configured, skipping file upload")
-            return True, 0, None  # Silent skip if not configured
+            return True, 0, None, None, None  # Silent skip if not configured
 
         s3_client = self.get_s3_client()
         if not s3_client:
-            return False, 0, "Failed to initialize S3 client"
+            return False, 0, "Failed to initialize S3 client", None, None
 
-        # Merge all files into single PDF
-        merged_pdf = self.merge_files_to_pdf(files_data)
+        # Use pre-generated merged PDF or generate new one
         if not merged_pdf:
-            return False, 0, "Failed to merge files into PDF"
+            merged_pdf = self.merge_files_to_pdf(files_data)
+        if not merged_pdf:
+            return False, 0, "Failed to merge files into PDF", None, None
 
         try:
             # Create S3 key with date and timestamp
@@ -1680,12 +1686,43 @@ Return ONLY the business purpose statement, nothing else."""
             )
 
             logger.info(f"Uploaded merged PDF to S3: {s3_key}")
-            return True, len(files_data), None
+            return True, len(files_data), None, s3_key, merged_pdf
 
         except ClientError as e:
             error_msg = f"Failed to upload merged PDF: {str(e)}"
             logger.error(error_msg)
-            return False, 0, error_msg
+            return False, 0, error_msg, None, None
+
+    def generate_presigned_url(self, s3_key: str, expiration: int = 604800) -> str:
+        """
+        Generate a presigned URL for an S3 object.
+
+        Args:
+            s3_key: The S3 object key
+            expiration: URL expiration time in seconds (default: 7 days = 604800 seconds)
+
+        Returns:
+            Presigned URL string or None if failed
+        """
+        bucket_name = st.secrets.get("S3_BUCKET_NAME") or os.getenv("S3_BUCKET_NAME")
+        if not bucket_name:
+            return None
+
+        s3_client = self.get_s3_client()
+        if not s3_client:
+            return None
+
+        try:
+            url = s3_client.generate_presigned_url(
+                "get_object",
+                Params={"Bucket": bucket_name, "Key": s3_key},
+                ExpiresIn=expiration,
+            )
+            logger.info(f"Generated presigned URL for {s3_key}, expires in {expiration} seconds")
+            return url
+        except ClientError as e:
+            logger.error(f"Failed to generate presigned URL: {str(e)}")
+            return None
 
     def render_sidebar(self):
         """Render the sidebar with configuration options"""
@@ -1739,6 +1776,8 @@ Return ONLY the business purpose statement, nothing else."""
             st.session_state.auto_correction_done = False
             st.session_state.submission_success = False
             st.session_state.s3_upload_message = None
+            st.session_state.s3_presigned_url = None
+            st.session_state.merged_pdf_bytes = None
             st.rerun()
 
     def render_metadata_form(self):
@@ -2674,6 +2713,36 @@ Return ONLY the business purpose statement, nothing else."""
         """
         )
 
+        # Generate merged PDF if we have uploaded files and haven't generated it yet
+        if st.session_state.uploaded_files_data and not st.session_state.get("merged_pdf_bytes"):
+            merged_pdf = self.merge_files_to_pdf(st.session_state.uploaded_files_data)
+            if merged_pdf:
+                st.session_state.merged_pdf_bytes = merged_pdf
+
+        # Show download button for combined PDF (before submission)
+        if st.session_state.get("merged_pdf_bytes"):
+            st.markdown("### 📄 Combined Receipts PDF")
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    label="⬇️ Download PDF",
+                    data=st.session_state.merged_pdf_bytes,
+                    file_name="expense_receipts.pdf",
+                    mime="application/pdf",
+                    use_container_width=True,
+                )
+            with col2:
+                if st.session_state.get("s3_presigned_url"):
+                    st.link_button(
+                        label="🔗 Open S3 Link",
+                        url=st.session_state.s3_presigned_url,
+                        use_container_width=True,
+                    )
+            if st.session_state.get("s3_presigned_url"):
+                st.caption("⏰ S3 link expires in 7 days")
+
+        st.markdown("---")
+
         # Show success message if already submitted
         if st.session_state.get("submission_success", False):
             st.success("✅ Data successfully submitted to both Sheet1 and Details!")
@@ -2698,21 +2767,30 @@ Return ONLY the business purpose statement, nothing else."""
                             st.success("✅ Data successfully submitted to both Sheet1 and Details!")
 
                             # Upload files to AWS S3
-                            if st.session_state.uploaded_files_data:
+                            if st.session_state.uploaded_files_data or st.session_state.get("merged_pdf_bytes"):
                                 with st.spinner("Uploading files to S3..."):
-                                    s3_success, uploaded_count, s3_error = (
+                                    s3_success, uploaded_count, s3_error, s3_key, merged_pdf = (
                                         self.upload_files_to_s3(
-                                            st.session_state.uploaded_files_data
+                                            st.session_state.uploaded_files_data,
+                                            st.session_state.get("merged_pdf_bytes")
                                         )
                                     )
 
-                                    if s3_success and uploaded_count > 0:
-                                        st.session_state.s3_upload_message = f"📁 {uploaded_count} file(s) merged into single PDF and uploaded to S3!"
+                                    if s3_success and (uploaded_count > 0 or s3_key):
+                                        file_count = uploaded_count or len(st.session_state.uploaded_files_data)
+                                        st.session_state.s3_upload_message = f"📁 {file_count} file(s) merged into single PDF and uploaded to S3!"
+
+                                        # Generate presigned URL (7 days expiration)
+                                        if s3_key:
+                                            presigned_url = self.generate_presigned_url(s3_key)
+                                            st.session_state.s3_presigned_url = presigned_url
+
                                         st.success(st.session_state.s3_upload_message)
                                     elif not s3_success:
                                         st.warning(f"📁 S3 upload failed: {s3_error}")
 
                             st.balloons()
+                            st.rerun()
                         else:
                             st.error(
                                 "❌ Failed to submit data. Please check your configuration."
@@ -2732,6 +2810,8 @@ Return ONLY the business purpose statement, nothing else."""
             st.session_state.auto_correction_done = False
             st.session_state.submission_success = False
             st.session_state.s3_upload_message = None
+            st.session_state.s3_presigned_url = None
+            st.session_state.merged_pdf_bytes = None
             st.rerun()
 
     def render_progress_indicator(self):
