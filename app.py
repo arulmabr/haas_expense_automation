@@ -1707,7 +1707,7 @@ Return ONLY the business purpose statement, nothing else."""
     def redact_pii_from_pdf(self, pdf_bytes: bytes) -> bytes:
         """
         Redact PII (emails, phone numbers, addresses) from a PDF's text layer.
-        Returns redacted PDF bytes. Image-only pages pass through unchanged.
+        Uses OCR (Tesseract) on image-only pages to extract text before redacting.
         """
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -1716,14 +1716,17 @@ Return ONLY the business purpose statement, nothing else."""
             for page_num in range(len(doc)):
                 page = doc[page_num]
                 page_text = page.get_text()
-                if not page_text.strip():
-                    continue  # Skip image-only pages with no text layer
 
-                # Redact personal emails and phone numbers
+                if not page_text.strip():
+                    # Image-only page — use OCR with word-level bounding boxes
+                    ocr_count = self._redact_ocr_page(page, page_num)
+                    redaction_count += ocr_count
+                    continue
+
+                # Text-layer page — use standard search_for approach
                 for pattern_name, pattern in PII_PATTERNS.items():
                     for match in pattern.finditer(page_text):
                         matched_text = match.group()
-                        # Only redact emails from personal domains
                         if pattern_name == "email" and not PERSONAL_EMAIL_DOMAINS.search(matched_text):
                             continue
                         rects = page.search_for(matched_text)
@@ -1807,6 +1810,101 @@ Return ONLY the business purpose statement, nothing else."""
                 rects = page.search_for(matched_text)
                 for rect in rects:
                     page.add_redact_annot(rect, fill=(0, 0, 0))
+
+    def _redact_ocr_page(self, page, page_num: int) -> int:
+        """
+        Redact PII from an image-only page using OCR word-level bounding boxes.
+        Returns count of redactions applied.
+        """
+        try:
+            tp = page.get_textpage_ocr(flags=0, full=True)
+        except Exception as ocr_err:
+            logger.warning(f"OCR failed on page {page_num + 1}, skipping: {ocr_err}")
+            return 0
+
+        # extractWORDS returns list of (x0, y0, x1, y1, "word", block_no, line_no, word_no)
+        words = tp.extractWORDS()
+        if not words:
+            return 0
+
+        # Group words into lines by (block_no, line_no)
+        lines = {}
+        for w in words:
+            key = (w[5], w[6])  # block_no, line_no
+            if key not in lines:
+                lines[key] = []
+            lines[key].append(w)
+
+        # Sort lines by vertical position and build line text + word map
+        sorted_lines = []
+        for key in sorted(lines.keys()):
+            line_words = sorted(lines[key], key=lambda w: w[0])  # sort by x0
+            line_text = " ".join(w[4] for w in line_words)
+            sorted_lines.append({"text": line_text, "words": line_words})
+
+        full_text = "\n".join(ln["text"] for ln in sorted_lines)
+        redaction_count = 0
+
+        # Helper: redact words within a line that overlap with a matched substring
+        def redact_match_in_line(line_info, match_text):
+            nonlocal redaction_count
+            match_lower = match_text.lower()
+            line_lower = line_info["text"].lower()
+            idx = line_lower.find(match_lower)
+            if idx == -1:
+                return
+            # Find which words overlap with the match span
+            char_pos = 0
+            for w in line_info["words"]:
+                word_text = w[4]
+                word_end = char_pos + len(word_text)
+                match_end = idx + len(match_text)
+                if word_end > idx and char_pos < match_end:
+                    rect = fitz.Rect(w[0], w[1], w[2], w[3])
+                    page.add_redact_annot(rect, fill=(0, 0, 0))
+                    redaction_count += 1
+                char_pos = word_end + 1  # +1 for space
+
+        # Match PII patterns against the full OCR text
+        for pattern_name, pattern in PII_PATTERNS.items():
+            for match in pattern.finditer(full_text):
+                matched_text = match.group()
+                if pattern_name == "email" and not PERSONAL_EMAIL_DOMAINS.search(matched_text):
+                    continue
+                for line_info in sorted_lines:
+                    if matched_text.lower() in line_info["text"].lower():
+                        redact_match_in_line(line_info, matched_text)
+
+        # Match address patterns
+        for pattern in ADDRESS_PATTERNS:
+            for match in pattern.finditer(full_text):
+                matched_text = match.group()
+                for line_info in sorted_lines:
+                    if matched_text.lower() in line_info["text"].lower():
+                        redact_match_in_line(line_info, matched_text)
+
+        # Label-based address redaction
+        for i, line_info in enumerate(sorted_lines):
+            if ADDRESS_LABELS.search(line_info["text"]):
+                for j in range(1, ADDRESS_LABEL_MAX_LINES + 1):
+                    if i + j >= len(sorted_lines):
+                        break
+                    next_line = sorted_lines[i + j]
+                    next_text = next_line["text"].strip()
+                    if (not next_text
+                            or ADDRESS_LABELS.search(next_text)
+                            or AMOUNT_LINE_PATTERN.match(next_text)):
+                        break
+                    for w in next_line["words"]:
+                        rect = fitz.Rect(w[0], w[1], w[2], w[3])
+                        page.add_redact_annot(rect, fill=(0, 0, 0))
+                        redaction_count += 1
+
+        if redaction_count > 0:
+            page.apply_redactions()
+            logger.info(f"OCR redaction on page {page_num + 1}: {redaction_count} items")
+
+        return redaction_count
 
     def upload_files_to_s3(self, files_data: Dict[str, bytes], merged_pdf: bytes = None) -> tuple:
         """
