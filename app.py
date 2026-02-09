@@ -19,6 +19,7 @@ from pydantic import BaseModel
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import boto3
 from botocore.exceptions import ClientError
+from openpyxl import load_workbook
 
 # Handle different Streamlit versions
 try:
@@ -1906,6 +1907,108 @@ Return ONLY the business purpose statement, nothing else."""
 
         return redaction_count
 
+    # ── XLSX Summary Generation ──────────────────────────────────────────
+
+    # Template row layout: category label row, then data slot rows
+    XLSX_SECTIONS = {
+        "FLIGHT": {"label_row": 15, "start": 16, "end": 17},
+        "OTHER_TRANSPORT": {"label_row": 18, "start": 19, "end": 23},
+        "OTHER_MISC": {"label_row": 24, "start": 25, "end": 27},
+        "MEAL": {"label_row": 28, "start": 29, "end": 35},
+        "ENT_MEAL": {"label_row": 36, "start": 37, "end": 39},
+        "HOTEL": {"label_row": 40, "start": 41, "end": 43},
+    }
+
+    # Map expense cat_key → XLSX section key
+    CATEGORY_TO_SECTION = {
+        "AIRFARE": "FLIGHT",
+        "AIRFARE_CHANGE_FEE": "OTHER_TRANSPORT",
+        "RENTAL_CAR": "OTHER_TRANSPORT",
+        "PERSONAL_VEHICLE": "OTHER_TRANSPORT",
+        "GROUND_TRANSPORT": "OTHER_TRANSPORT",
+        "CONFERENCE_FEE": "OTHER_MISC",
+        "SUPPLIES": "OTHER_MISC",
+        "OTHER_MISC": "OTHER_MISC",
+        "MEAL": "MEAL",
+        "LODGING": "HOTEL",
+    }
+
+    def generate_xlsx_summary(self, expenses: list, metadata: dict) -> bytes:
+        """Generate an XLSX summary sheet from the template and expense data.
+
+        Returns the workbook as bytes suitable for st.download_button.
+        """
+        template_path = os.path.join(
+            os.path.dirname(__file__), "templates", "expense_summary_template.xlsx"
+        )
+        wb = load_workbook(template_path)
+        ws = wb["Expenses"]
+
+        # ── Fill header fields ──
+        name = f"{metadata.get('first_name', '')} {metadata.get('last_name', '')}".strip()
+        ws["B1"] = name
+        ws["B2"] = metadata.get("description", "")
+
+        start_date = metadata.get("start_date", "")
+        end_date = metadata.get("end_date", "")
+        if hasattr(start_date, "strftime"):
+            start_date = start_date.strftime("%m/%d/%Y")
+        if hasattr(end_date, "strftime"):
+            end_date = end_date.strftime("%m/%d/%Y")
+        ws["B4"] = f"{start_date} - {end_date}" if start_date else ""
+
+        # ── Group expenses by XLSX section ──
+        section_expenses: Dict[str, list] = {key: [] for key in self.XLSX_SECTIONS}
+
+        for expense in expenses:
+            exchange_rate = metadata.get("exchange_rates", {}).get(expense.currency, 1.0)
+            amount_usd = expense.amount * exchange_rate
+
+            cat_key = None
+            for key, val in EXPENSE_CATEGORIES.items():
+                if val == expense.category or key == expense.category:
+                    cat_key = key
+                    break
+
+            section_key = self.CATEGORY_TO_SECTION.get(cat_key, "OTHER_MISC")
+            section_expenses[section_key].append((expense, amount_usd))
+
+        # ── Track total inserted rows for offset adjustment ──
+        rows_inserted = 0
+
+        for section_key, section_info in self.XLSX_SECTIONS.items():
+            items = section_expenses[section_key]
+            if not items:
+                continue
+
+            start = section_info["start"] + rows_inserted
+            end = section_info["end"] + rows_inserted
+            slots = end - start + 1
+
+            # Insert extra rows if we have more expenses than slots
+            overflow = len(items) - slots
+            if overflow > 0:
+                ws.insert_rows(end + 1, overflow)
+                rows_inserted += overflow
+                end += overflow
+
+            # Fill expense data into rows
+            for i, (expense, amount_usd) in enumerate(items):
+                row = start + i
+                ws.cell(row=row, column=2, value=expense.date)       # B: Date
+                ws.cell(row=row, column=3, value=round(amount_usd, 2))  # C: USD Amt
+                ws.cell(row=row, column=4, value=expense.description)   # D: Notes
+
+        # ── Update SUM formula if rows were inserted ──
+        total_row = 44 + rows_inserted
+        ws.cell(row=total_row, column=3, value=f"=SUM(C14:C{total_row - 1})")
+
+        # ── Write to bytes ──
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf.getvalue()
+
     def upload_files_to_s3(self, files_data: Dict[str, bytes], merged_pdf: bytes = None) -> tuple:
         """
         Upload merged PDF to AWS S3. Uses pre-generated merged_pdf if provided, otherwise generates it.
@@ -3007,6 +3110,22 @@ Return ONLY the business purpose statement, nothing else."""
                     )
             if st.session_state.get("s3_presigned_url"):
                 st.caption("⏰ S3 link expires in 7 days")
+
+        # XLSX summary download
+        if expenses:
+            st.markdown("### 📊 Expense Summary Spreadsheet")
+            try:
+                xlsx_bytes = self.generate_xlsx_summary(expenses, metadata)
+                st.download_button(
+                    label="⬇️ Download XLSX Summary",
+                    data=xlsx_bytes,
+                    file_name="expense_summary.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
+            except Exception as e:
+                logger.error(f"Failed to generate XLSX summary: {e}")
+                st.error(f"Could not generate XLSX summary: {e}")
 
         st.markdown("---")
 
