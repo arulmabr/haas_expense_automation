@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import logging
 import time
 import PyPDF2
+import fitz
+import re
 import io
 from pydantic import BaseModel
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -231,6 +233,54 @@ CURRENCY_OPTIONS = [
     "INR",
     "MXN",
     "BRL",
+]
+
+
+# PII patterns for redaction
+PII_PATTERNS = {
+    "email": re.compile(r'[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}'),
+    "us_phone": re.compile(r'(?<!\d)(?:\+?1[\s\-.]?)?\(?\d{3}\)?[\s\-.]?\d{3}[\s\-.]?\d{4}(?!\d)'),
+    "intl_phone": re.compile(r'(?<!\d)\+\d{1,3}[\s\-.]?\d{1,4}[\s\-.]?\d{2,4}[\s\-.]?\d{2,4}(?:[\s\-.]?\d{2,4})?(?!\d)'),
+}
+
+ADDRESS_LABELS = re.compile(
+    r'(?:'
+    r'Pick\s*-?\s*up|Drop\s*-?\s*off|Pickup|Dropoff'  # Ride-sharing
+    r'|(?:Billing|Shipping|Mailing|Property|Hotel|Departure|Arrival|From|To)\s+Address'
+    r'|(?:Check.?in|Check.?out)\s+(?:at|location|address)'
+    r'|Location|Destination|Address|Venue'
+    r')',
+    re.IGNORECASE,
+)
+
+ADDRESS_PATTERNS = [
+    # US street address: 123 N Main St, Suite 100, City, CA 90210
+    re.compile(
+        r'\d{1,6}\s+(?:[NSEW]\.?\s+)?(?:[A-Z][a-zA-Z]*\.?\s+){1,4}'
+        r'(?:St(?:reet)?|Ave(?:nue)?|Blvd|Boulevard|Dr(?:ive)?|Ln|Lane|Rd|Road|Way|Ct|Court'
+        r'|Pl(?:ace)?|Pkwy|Parkway|Cir(?:cle)?|Ter(?:race)?|Hwy|Highway)\b'
+        r'(?:\.?,?\s*(?:Ste|Suite|Apt|Unit|#)\s*\d+[A-Za-z]?)?'
+        r'(?:\.?,?\s+[A-Z][a-zA-Z]+(?:\s+[A-Z][a-zA-Z]+)?)?'
+        r'(?:\.?,?\s+[A-Z]{2})?'
+        r'(?:\.?,?\s+\d{5}(?:\-\d{4})?)?',
+        re.IGNORECASE,
+    ),
+    # City, State ZIP (standalone line)
+    re.compile(
+        r'[A-Z][a-zA-Z\s]+,\s*[A-Z]{2}\s+\d{5}(?:\-\d{4})?',
+    ),
+    # PO Box
+    re.compile(
+        r'P\.?O\.?\s*Box\s+\d+',
+        re.IGNORECASE,
+    ),
+    # International postal codes (UK, Canada, Australia, etc.)
+    re.compile(
+        r'[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}',  # UK: SW1A 1AA
+    ),
+    re.compile(
+        r'[A-Z]\d[A-Z]\s*\d[A-Z]\d',  # Canada: K1A 0B1
+    ),
 ]
 
 
@@ -1642,6 +1692,100 @@ Return ONLY the business purpose statement, nothing else."""
             logger.error(f"Failed to merge files to PDF: {str(e)}")
             return None
 
+    def redact_pii_from_pdf(self, pdf_bytes: bytes) -> bytes:
+        """
+        Redact PII (emails, phone numbers, addresses) from a PDF's text layer.
+        Returns redacted PDF bytes. Image-only pages pass through unchanged.
+        """
+        try:
+            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            redaction_count = 0
+
+            for page_num in range(len(doc)):
+                page = doc[page_num]
+                page_text = page.get_text()
+                if not page_text.strip():
+                    continue  # Skip image-only pages with no text layer
+
+                # Redact emails and phone numbers
+                for pattern_name, pattern in PII_PATTERNS.items():
+                    for match in pattern.finditer(page_text):
+                        matched_text = match.group()
+                        rects = page.search_for(matched_text)
+                        for rect in rects:
+                            page.add_redact_annot(rect, fill=(0, 0, 0))
+                            redaction_count += 1
+
+                # Redact addresses (ride locations, street addresses, etc.)
+                self._redact_addresses(page)
+
+                # Apply all redactions on this page
+                page.apply_redactions()
+
+            logger.info(f"PII redaction complete: {redaction_count} items redacted across {len(doc)} pages")
+            redacted_bytes = doc.tobytes()
+            doc.close()
+            return redacted_bytes
+
+        except Exception as e:
+            logger.error(f"PII redaction failed, returning original PDF: {str(e)}")
+            return pdf_bytes  # Fail safe: return unredacted PDF
+
+    def _redact_addresses(self, page):
+        """
+        Redact addresses from a PDF page.
+        - Label-based: detects address-related labels and redacts text on the same + next line
+        - Pattern-based: matches US street addresses, City/State/ZIP, PO Boxes, international postal codes
+        """
+        text_dict = page.get_text("dict")
+        blocks = text_dict.get("blocks", [])
+
+        # Collect all text lines with their positions
+        all_lines = []
+        for block in blocks:
+            if block.get("type") != 0:  # text blocks only
+                continue
+            for line in block.get("lines", []):
+                line_text = ""
+                line_bbox = None
+                for span in line.get("spans", []):
+                    line_text += span.get("text", "")
+                    span_bbox = fitz.Rect(span["bbox"])
+                    if line_bbox is None:
+                        line_bbox = span_bbox
+                    else:
+                        line_bbox |= span_bbox  # union
+                if line_text.strip() and line_bbox:
+                    all_lines.append({"text": line_text, "bbox": line_bbox})
+
+        # Label-based: find address labels and redact text on the same + next line
+        for i, line_info in enumerate(all_lines):
+            if ADDRESS_LABELS.search(line_info["text"]):
+                # Redact address text on the same line (after the label)
+                label_match = ADDRESS_LABELS.search(line_info["text"])
+                after_label = line_info["text"][label_match.end():]
+                if after_label.strip():
+                    rects = page.search_for(after_label.strip())
+                    for rect in rects:
+                        page.add_redact_annot(rect, fill=(0, 0, 0))
+
+                # Redact the next line (likely the address continuation)
+                if i + 1 < len(all_lines):
+                    next_text = all_lines[i + 1]["text"].strip()
+                    if next_text and not ADDRESS_LABELS.search(next_text):
+                        rects = page.search_for(next_text)
+                        for rect in rects:
+                            page.add_redact_annot(rect, fill=(0, 0, 0))
+
+        # Pattern-based: match addresses anywhere on the page
+        page_text = page.get_text()
+        for pattern in ADDRESS_PATTERNS:
+            for match in pattern.finditer(page_text):
+                matched_text = match.group()
+                rects = page.search_for(matched_text)
+                for rect in rects:
+                    page.add_redact_annot(rect, fill=(0, 0, 0))
+
     def upload_files_to_s3(self, files_data: Dict[str, bytes], merged_pdf: bytes = None) -> tuple:
         """
         Upload merged PDF to AWS S3. Uses pre-generated merged_pdf if provided, otherwise generates it.
@@ -1669,6 +1813,8 @@ Return ONLY the business purpose statement, nothing else."""
         # Use pre-generated merged PDF or generate new one
         if not merged_pdf:
             merged_pdf = self.merge_files_to_pdf(files_data)
+            if merged_pdf:
+                merged_pdf = self.redact_pii_from_pdf(merged_pdf)
         if not merged_pdf:
             return False, 0, "Failed to merge files into PDF", None, None
 
@@ -2717,6 +2863,7 @@ Return ONLY the business purpose statement, nothing else."""
         if st.session_state.uploaded_files_data and not st.session_state.get("merged_pdf_bytes"):
             merged_pdf = self.merge_files_to_pdf(st.session_state.uploaded_files_data)
             if merged_pdf:
+                merged_pdf = self.redact_pii_from_pdf(merged_pdf)
                 st.session_state.merged_pdf_bytes = merged_pdf
 
         # Show download button for combined PDF (before submission)
