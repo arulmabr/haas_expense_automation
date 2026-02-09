@@ -243,6 +243,15 @@ PII_PATTERNS = {
     "intl_phone": re.compile(r'(?<!\d)\+\d{1,3}[\s\-.]?\d{1,4}[\s\-.]?\d{2,4}[\s\-.]?\d{2,4}(?:[\s\-.]?\d{2,4})?(?!\d)'),
 }
 
+# Personal email domains to redact — business/service/institutional emails are preserved
+PERSONAL_EMAIL_DOMAINS = re.compile(
+    r'@(?:gmail|yahoo|hotmail|outlook|aol|icloud|protonmail|zoho|ymail|live|msn|me|mac)\.',
+    re.IGNORECASE,
+)
+
+# Lines that look like amounts/prices — skip these during label-based address redaction
+AMOUNT_LINE_PATTERN = re.compile(r'^\s*[\$€£¥]?\s*\d+[.,]\d{2}\s*$')
+
 ADDRESS_LABELS = re.compile(
     r'(?:'
     r'Pick\s*-?\s*up|Drop\s*-?\s*off|Pickup|Dropoff'  # Ride-sharing
@@ -1707,10 +1716,13 @@ Return ONLY the business purpose statement, nothing else."""
                 if not page_text.strip():
                     continue  # Skip image-only pages with no text layer
 
-                # Redact emails and phone numbers
+                # Redact personal emails and phone numbers
                 for pattern_name, pattern in PII_PATTERNS.items():
                     for match in pattern.finditer(page_text):
                         matched_text = match.group()
+                        # Only redact emails from personal domains
+                        if pattern_name == "email" and not PERSONAL_EMAIL_DOMAINS.search(matched_text):
+                            continue
                         rects = page.search_for(matched_text)
                         for rect in rects:
                             page.add_redact_annot(rect, fill=(0, 0, 0))
@@ -1770,9 +1782,12 @@ Return ONLY the business purpose statement, nothing else."""
                         page.add_redact_annot(rect, fill=(0, 0, 0))
 
                 # Redact the next line (likely the address continuation)
+                # Skip if it looks like an amount/price or another label
                 if i + 1 < len(all_lines):
                     next_text = all_lines[i + 1]["text"].strip()
-                    if next_text and not ADDRESS_LABELS.search(next_text):
+                    if (next_text
+                            and not ADDRESS_LABELS.search(next_text)
+                            and not AMOUNT_LINE_PATTERN.match(next_text)):
                         rects = page.search_for(next_text)
                         for rect in rects:
                             page.add_redact_annot(rect, fill=(0, 0, 0))
