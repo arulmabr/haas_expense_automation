@@ -253,6 +253,9 @@ PERSONAL_EMAIL_DOMAINS = re.compile(
 # Lines that look like amounts/prices — skip these during label-based address redaction
 AMOUNT_LINE_PATTERN = re.compile(r'^\s*[\$€£¥]?\s*\d+[.,]\d{2}\s*$')
 
+# Lines that are just a time (e.g. "9:30 AM") — skip during label-based address redaction
+TIME_LINE_PATTERN = re.compile(r'^\s*\d{1,2}:\d{2}\s*(?:AM|PM|am|pm|a\.m\.|p\.m\.)?\s*$')
+
 # Max lines to redact after an address label (addresses can span name, street, apt, city/state/zip)
 ADDRESS_LABEL_MAX_LINES = 4
 
@@ -1738,8 +1741,8 @@ Return ONLY the business purpose statement, nothing else."""
                 # Redact addresses (ride locations, street addresses, etc.)
                 self._redact_addresses(page)
 
-                # Apply all redactions on this page
-                page.apply_redactions()
+                # Apply all redactions on this page (keep underlying images intact)
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
 
             logger.info(f"PII redaction complete: {redaction_count} items redacted across {len(doc)} pages")
             redacted_bytes = doc.tobytes()
@@ -1790,18 +1793,24 @@ Return ONLY the business purpose statement, nothing else."""
 
                 # Redact subsequent lines (addresses can span multiple lines:
                 # name, street, apt/unit, city/state/zip, country)
-                for j in range(1, ADDRESS_LABEL_MAX_LINES + 1):
-                    if i + j >= len(all_lines):
-                        break
+                j = 1
+                addr_lines_found = 0
+                while addr_lines_found < ADDRESS_LABEL_MAX_LINES and i + j < len(all_lines):
                     next_text = all_lines[i + j]["text"].strip()
                     # Stop at another label, an amount, or empty text
                     if (not next_text
                             or ADDRESS_LABELS.search(next_text)
                             or AMOUNT_LINE_PATTERN.match(next_text)):
                         break
+                    # Skip time-only lines (e.g. "9:30 AM") — don't redact or count
+                    if TIME_LINE_PATTERN.match(next_text):
+                        j += 1
+                        continue
                     rects = page.search_for(next_text)
                     for rect in rects:
                         page.add_redact_annot(rect, fill=(0, 0, 0))
+                    addr_lines_found += 1
+                    j += 1
 
         # Pattern-based: match addresses anywhere on the page
         page_text = page.get_text()
@@ -1887,22 +1896,28 @@ Return ONLY the business purpose statement, nothing else."""
         # Label-based address redaction
         for i, line_info in enumerate(sorted_lines):
             if ADDRESS_LABELS.search(line_info["text"]):
-                for j in range(1, ADDRESS_LABEL_MAX_LINES + 1):
-                    if i + j >= len(sorted_lines):
-                        break
+                j = 1
+                addr_lines_found = 0
+                while addr_lines_found < ADDRESS_LABEL_MAX_LINES and i + j < len(sorted_lines):
                     next_line = sorted_lines[i + j]
                     next_text = next_line["text"].strip()
                     if (not next_text
                             or ADDRESS_LABELS.search(next_text)
                             or AMOUNT_LINE_PATTERN.match(next_text)):
                         break
+                    # Skip time-only lines (e.g. "9:30 AM") — don't redact or count
+                    if TIME_LINE_PATTERN.match(next_text):
+                        j += 1
+                        continue
                     for w in next_line["words"]:
                         rect = fitz.Rect(w[0], w[1], w[2], w[3])
                         page.add_redact_annot(rect, fill=(0, 0, 0))
                         redaction_count += 1
+                    addr_lines_found += 1
+                    j += 1
 
         if redaction_count > 0:
-            page.apply_redactions()
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
             logger.info(f"OCR redaction on page {page_num + 1}: {redaction_count} items")
 
         return redaction_count
