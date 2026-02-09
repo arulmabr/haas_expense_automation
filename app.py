@@ -252,12 +252,15 @@ PERSONAL_EMAIL_DOMAINS = re.compile(
 # Lines that look like amounts/prices — skip these during label-based address redaction
 AMOUNT_LINE_PATTERN = re.compile(r'^\s*[\$€£¥]?\s*\d+[.,]\d{2}\s*$')
 
+# Max lines to redact after an address label (addresses can span name, street, apt, city/state/zip)
+ADDRESS_LABEL_MAX_LINES = 4
+
 ADDRESS_LABELS = re.compile(
     r'(?:'
     r'Pick\s*-?\s*up|Drop\s*-?\s*off|Pickup|Dropoff'  # Ride-sharing
     r'|(?:Billing|Shipping|Mailing|Property|Hotel|Departure|Arrival|From|To)\s+Address'
     r'|(?:Check.?in|Check.?out)\s+(?:at|location|address)'
-    r'|Location|Destination|Address|Venue'
+    r'|Location|Destination|Address|Venue\b(?!s)'
     r')',
     re.IGNORECASE,
 )
@@ -1781,16 +1784,20 @@ Return ONLY the business purpose statement, nothing else."""
                     for rect in rects:
                         page.add_redact_annot(rect, fill=(0, 0, 0))
 
-                # Redact the next line (likely the address continuation)
-                # Skip if it looks like an amount/price or another label
-                if i + 1 < len(all_lines):
-                    next_text = all_lines[i + 1]["text"].strip()
-                    if (next_text
-                            and not ADDRESS_LABELS.search(next_text)
-                            and not AMOUNT_LINE_PATTERN.match(next_text)):
-                        rects = page.search_for(next_text)
-                        for rect in rects:
-                            page.add_redact_annot(rect, fill=(0, 0, 0))
+                # Redact subsequent lines (addresses can span multiple lines:
+                # name, street, apt/unit, city/state/zip, country)
+                for j in range(1, ADDRESS_LABEL_MAX_LINES + 1):
+                    if i + j >= len(all_lines):
+                        break
+                    next_text = all_lines[i + j]["text"].strip()
+                    # Stop at another label, an amount, or empty text
+                    if (not next_text
+                            or ADDRESS_LABELS.search(next_text)
+                            or AMOUNT_LINE_PATTERN.match(next_text)):
+                        break
+                    rects = page.search_for(next_text)
+                    for rect in rects:
+                        page.add_redact_annot(rect, fill=(0, 0, 0))
 
         # Pattern-based: match addresses anywhere on the page
         page_text = page.get_text()
