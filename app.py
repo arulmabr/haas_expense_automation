@@ -987,6 +987,12 @@ Document text:
                 "trip_duration": trip_duration,
                 "destinations": destinations_str,
                 "num_trip_legs": num_trip_legs,
+                # Personal travel / visa defaults
+                "personal_start_date": None,
+                "personal_end_date": None,
+                "visa_status": "N/A",
+                "visa_us_check": "N/A",
+                "visa_wire_transfer": "N/A",
                 "currencies": ["USD"],  # Default to USD
                 "exchange_rates": {"USD": 1.0},
                 "median_date": start_date.strftime(
@@ -1373,6 +1379,58 @@ Return ONLY the business purpose statement, nothing else."""
                     ),
                 )
 
+            # === PERSONAL TRAVEL DATES (optional) ===
+            has_personal = st.checkbox(
+                "Trip included personal travel days",
+                value=st.session_state.metadata.get("personal_start_date") is not None,
+            )
+            if has_personal:
+                pcol1, pcol2 = st.columns(2)
+                with pcol1:
+                    personal_start_date = st.date_input(
+                        "Personal Travel Start Date",
+                        value=st.session_state.metadata.get(
+                            "personal_start_date", datetime.now().date()
+                        ),
+                    )
+                with pcol2:
+                    personal_end_date = st.date_input(
+                        "Personal Travel End Date",
+                        value=st.session_state.metadata.get(
+                            "personal_end_date", datetime.now().date()
+                        ),
+                    )
+            else:
+                personal_start_date = None
+                personal_end_date = None
+
+            st.markdown("---")
+
+            # === GUEST / VISA INFO (optional) ===
+            visa_options = ["N/A", "Yes", "No"]
+            with st.expander("Guest/Visa Info (if applicable)"):
+                visa_status = st.selectbox(
+                    "Is the non-faculty guest visiting on a visa?",
+                    options=visa_options,
+                    index=visa_options.index(
+                        st.session_state.metadata.get("visa_status", "N/A")
+                    ),
+                )
+                visa_us_check = st.selectbox(
+                    "If visiting on a visa but US-based, can they accept a US check?",
+                    options=visa_options,
+                    index=visa_options.index(
+                        st.session_state.metadata.get("visa_us_check", "N/A")
+                    ),
+                )
+                visa_wire_transfer = st.selectbox(
+                    "Has internationally based guest set up wire-transfer/banking info?",
+                    options=visa_options,
+                    index=visa_options.index(
+                        st.session_state.metadata.get("visa_wire_transfer", "N/A")
+                    ),
+                )
+
             st.markdown("---")
 
             # === CURRENCIES ===
@@ -1444,6 +1502,12 @@ Return ONLY the business purpose statement, nothing else."""
                         "destinations": destinations,
                         "start_date": start_date,
                         "end_date": end_date,
+                        # Personal travel / visa
+                        "personal_start_date": personal_start_date,
+                        "personal_end_date": personal_end_date,
+                        "visa_status": visa_status,
+                        "visa_us_check": visa_us_check,
+                        "visa_wire_transfer": visa_wire_transfer,
                         # Currency
                         "currencies": all_currencies,
                         "exchange_rates": exchange_rates,
@@ -1972,6 +2036,21 @@ Return ONLY the business purpose statement, nothing else."""
             end_date = end_date.strftime("%m/%d/%Y")
         ws["B4"] = f"{start_date} - {end_date}" if start_date else ""
 
+        # ── Personal travel dates (B5) ──
+        p_start = metadata.get("personal_start_date")
+        p_end = metadata.get("personal_end_date")
+        if p_start and p_end:
+            if hasattr(p_start, "strftime"):
+                p_start = p_start.strftime("%m/%d/%Y")
+            if hasattr(p_end, "strftime"):
+                p_end = p_end.strftime("%m/%d/%Y")
+            ws["B5"] = f"{p_start} - {p_end}"
+
+        # ── Visa / guest info (B6-B8) ──
+        ws["B6"] = metadata.get("visa_status", "N/A")
+        ws["B7"] = metadata.get("visa_us_check", "N/A")
+        ws["B8"] = metadata.get("visa_wire_transfer", "N/A")
+
         # ── Group expenses by XLSX section ──
         section_expenses: Dict[str, list] = {key: [] for key in self.XLSX_SECTIONS}
 
@@ -2212,6 +2291,62 @@ Return ONLY the business purpose statement, nothing else."""
                 help="Explain how UC Berkeley benefited from this travel. Focus on what was ACCOMPLISHED (e.g., 'Attending conference to present research' not 'Registering for conference'). Include why each leg of the trip was taken.",
             )
 
+            # === PERSONAL TRAVEL DATES (optional) ===
+            has_personal = st.checkbox(
+                "Trip included personal travel days",
+                value=st.session_state.metadata.get("personal_start_date") is not None,
+                key="simple_has_personal",
+            )
+            if has_personal:
+                pcol1, pcol2 = st.columns(2)
+                with pcol1:
+                    personal_start_date = st.date_input(
+                        "Personal Travel Start Date",
+                        value=st.session_state.metadata.get(
+                            "personal_start_date", datetime.now().date()
+                        ),
+                        key="simple_personal_start",
+                    )
+                with pcol2:
+                    personal_end_date = st.date_input(
+                        "Personal Travel End Date",
+                        value=st.session_state.metadata.get(
+                            "personal_end_date", datetime.now().date()
+                        ),
+                        key="simple_personal_end",
+                    )
+            else:
+                personal_start_date = None
+                personal_end_date = None
+
+            # === GUEST / VISA INFO (optional) ===
+            visa_options = ["N/A", "Yes", "No"]
+            with st.expander("Guest/Visa Info (if applicable)"):
+                visa_status = st.selectbox(
+                    "Is the non-faculty guest visiting on a visa?",
+                    options=visa_options,
+                    index=visa_options.index(
+                        st.session_state.metadata.get("visa_status", "N/A")
+                    ),
+                    key="simple_visa_status",
+                )
+                visa_us_check = st.selectbox(
+                    "If visiting on a visa but US-based, can they accept a US check?",
+                    options=visa_options,
+                    index=visa_options.index(
+                        st.session_state.metadata.get("visa_us_check", "N/A")
+                    ),
+                    key="simple_visa_us_check",
+                )
+                visa_wire_transfer = st.selectbox(
+                    "Has internationally based guest set up wire-transfer/banking info?",
+                    options=visa_options,
+                    index=visa_options.index(
+                        st.session_state.metadata.get("visa_wire_transfer", "N/A")
+                    ),
+                    key="simple_visa_wire",
+                )
+
             # Filter out USD from both options and defaults
             non_usd_options = [c for c in CURRENCY_OPTIONS if c != "USD"]
             current_currencies = st.session_state.metadata.get("currencies", [])
@@ -2255,6 +2390,12 @@ Return ONLY the business purpose statement, nothing else."""
                             "start_date": start_date,
                             "end_date": end_date,
                             "description": description,
+                            # Personal travel / visa
+                            "personal_start_date": personal_start_date,
+                            "personal_end_date": personal_end_date,
+                            "visa_status": visa_status,
+                            "visa_us_check": visa_us_check,
+                            "visa_wire_transfer": visa_wire_transfer,
                             "currencies": all_currencies,
                             "exchange_rates": exchange_rates,
                             "median_date": median_date.strftime("%Y-%m-%d"),
