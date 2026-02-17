@@ -1876,18 +1876,22 @@ Return ONLY the business purpose statement, nothing else."""
 
                 if is_letter:
                     content_bbox = self._get_content_bbox(page)
-                    width_coverage = content_bbox.width / src_w
+                    min_margin = min(
+                        content_bbox.x0,              # left
+                        content_bbox.y0,              # top
+                        src_w - content_bbox.x1,      # right
+                        src_h - content_bbox.y1,      # bottom
+                    )
 
-                    if width_coverage > 0.80:
-                        # Content fills the page well — copy as-is
+                    if min_margin >= OPT_MARGIN * 0.5:
+                        # Adequate margins (>= 0.25") — copy as-is
                         dst_doc.insert_pdf(src_doc, from_page=page_num, to_page=page_num)
                     else:
-                        # Narrow content — crop whitespace and scale up
+                        # Insufficient margins — scale entire page to add margins
                         new_page = dst_doc.new_page(width=LETTER_WIDTH, height=LETTER_HEIGHT)
-                        scale = min(content_w / content_bbox.width,
-                                    content_h / content_bbox.height)
-                        scaled_w = content_bbox.width * scale
-                        scaled_h = content_bbox.height * scale
+                        scale = min(content_w / src_w, content_h / src_h)
+                        scaled_w = src_w * scale
+                        scaled_h = src_h * scale
 
                         x_offset = OPT_MARGIN + (content_w - scaled_w) / 2
                         y_offset = OPT_MARGIN
@@ -1896,8 +1900,7 @@ Return ONLY the business purpose statement, nothing else."""
                             x_offset, y_offset,
                             x_offset + scaled_w, y_offset + scaled_h,
                         )
-                        new_page.show_pdf_page(target_rect, src_doc, page_num,
-                                               clip=content_bbox)
+                        new_page.show_pdf_page(target_rect, src_doc, page_num)
                 else:
                     # Non-Letter (A3, landscape, etc.) — scale to fit with margins
                     new_page = dst_doc.new_page(width=LETTER_WIDTH, height=LETTER_HEIGHT)
