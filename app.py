@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import boto3
 from botocore.exceptions import ClientError
 from openpyxl import load_workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 
 # Handle different Streamlit versions
 try:
@@ -263,10 +264,10 @@ ADDRESS_LABELS = re.compile(
     r'(?:'
     r'Pick\s*-?\s*up|Drop\s*-?\s*off|Pickup|Dropoff'  # Ride-sharing
     r'|(?:Billing|Shipping|Mailing|Property|Hotel|Departure|Arrival|From|To)\s+Address'
-    r'|(?:Check.?in|Check.?out)\s+(?:at|location|address)'
-    r'|Location|Destination|Address|Venue\b(?!s)'
+    r'|^\s*(?:Check.?in|Check.?out)\s+(?:at|location|address)'  # Line-start only
+    r'|^\s*(?:Location|Destination|Address|Venue)\s*[:\-]'  # Line-start labels with delimiter
     r')',
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 
 ADDRESS_PATTERNS = [
@@ -299,21 +300,6 @@ ADDRESS_PATTERNS = [
     ),
 ]
 
-# PDF optimization constants (post-merge page normalization)
-LETTER_WIDTH = 612.0
-LETTER_HEIGHT = 792.0
-OPT_MARGIN = 36.0  # 0.5 inch
-OPT_MIN_TEXT_CHARS = 50
-OPT_MIN_IMG_DIM = 10  # pixels, to ignore spacer GIFs
-OPT_FOOTER_KEYWORDS = [
-    "report lost item", "contact support", "forgot password",
-    "privacy policy", "terms and conditions", "help center",
-    "find lost item", "my trips", "tip driver",
-    "get business profile", "start earning",
-    "return to member dashboard",
-]
-OPT_FOOTER_KEYWORD_THRESHOLD = 3
-OPT_FOOTER_MAX_TEXT_LEN = 200
 
 
 class ExpenseReportApp:
@@ -1788,154 +1774,36 @@ Return ONLY the business purpose statement, nothing else."""
             logger.error(f"Failed to merge files to PDF: {str(e)}")
             return None
 
-    def _should_skip_page(self, page) -> bool:
-        """Check if a page is boilerplate/footer that should be skipped."""
-        text = page.get_text().strip()
-        text_len = len(text)
-
-        # Tier 1: Nearly empty pages (< 50 chars text, no significant images)
-        if text_len < OPT_MIN_TEXT_CHARS:
-            images = page.get_images(full=True)
-            has_significant_image = False
-            for img in images:
-                try:
-                    xref = img[0]
-                    base_image = page.parent.extract_image(xref)
-                    if base_image:
-                        w = base_image.get("width", 0)
-                        h = base_image.get("height", 0)
-                        if w > OPT_MIN_IMG_DIM and h > OPT_MIN_IMG_DIM:
-                            has_significant_image = True
-                            break
-                except Exception:
-                    has_significant_image = True
-                    break
-            if not has_significant_image:
-                return True
-
-        # Tier 2: Short pages that match multiple footer keywords
-        if text_len < OPT_FOOTER_MAX_TEXT_LEN:
-            text_lower = text.lower()
-            matches = sum(1 for kw in OPT_FOOTER_KEYWORDS if kw in text_lower)
-            if matches >= OPT_FOOTER_KEYWORD_THRESHOLD:
-                return True
-
-        return False
-
-    def _get_content_bbox(self, page):
-        """Get bounding box of actual content (text + images only) on a page.
-        Excludes drawings (decorative backgrounds, accent bars) which inflate the bbox."""
-        rects = []
-
-        for b in page.get_text("dict", flags=fitz.TEXT_PRESERVE_IMAGES)["blocks"]:
-            r = fitz.Rect(b["bbox"])
-            if r.width > 2 and r.height > 2:
-                rects.append(r)
-
-        if not rects:
-            return page.rect
-
-        result = rects[0]
-        for r in rects[1:]:
-            result |= r  # union
-
-        # Tiny padding so we don't clip edges
-        result.x0 = max(0, result.x0 - 2)
-        result.y0 = max(0, result.y0 - 2)
-        result.x1 = min(page.rect.width, result.x1 + 2)
-        result.y1 = min(page.rect.height, result.y1 + 2)
-
-        return result
-
-    def _optimize_merged_pdf(self, pdf_bytes: bytes) -> bytes:
-        """Normalize all pages to US Letter with margins, skip boilerplate pages."""
+    def _normalize_page_sizes(self, pdf_bytes: bytes) -> bytes:
+        """Scale non-Letter pages to Letter so PDF viewers don't clip mixed sizes."""
+        LETTER_W, LETTER_H = 612.0, 792.0
+        TOLERANCE = 5.0
         try:
-            src_doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-            dst_doc = fitz.open()
-
-            content_w = LETTER_WIDTH - 2 * OPT_MARGIN
-            content_h = LETTER_HEIGHT - 2 * OPT_MARGIN
-            pages_kept = 0
-            tolerance = 5.0  # points — close enough to Letter
-
-            for page_num in range(len(src_doc)):
-                page = src_doc[page_num]
-
-                if self._should_skip_page(page):
-                    logger.info(f"Optimize: skipping boilerplate page {page_num + 1}")
-                    continue
-
-                src_w = page.rect.width
-                src_h = page.rect.height
-
-                if src_w <= 0 or src_h <= 0:
-                    continue
-
-                is_letter = (abs(src_w - LETTER_WIDTH) < tolerance and
-                             abs(src_h - LETTER_HEIGHT) < tolerance)
-
+            src = fitz.open(stream=pdf_bytes, filetype="pdf")
+            dst = fitz.open()
+            for i in range(len(src)):
+                page = src[i]
+                w, h = page.rect.width, page.rect.height
+                is_letter = (abs(w - LETTER_W) < TOLERANCE and
+                             abs(h - LETTER_H) < TOLERANCE)
                 if is_letter:
-                    content_bbox = self._get_content_bbox(page)
-                    min_margin = min(
-                        content_bbox.x0,              # left
-                        content_bbox.y0,              # top
-                        src_w - content_bbox.x1,      # right
-                        src_h - content_bbox.y1,      # bottom
-                    )
-
-                    if min_margin >= OPT_MARGIN * 0.5:
-                        # Adequate margins (>= 0.25") — copy as-is
-                        dst_doc.insert_pdf(src_doc, from_page=page_num, to_page=page_num)
-                    else:
-                        # Insufficient margins — scale entire page to add margins
-                        new_page = dst_doc.new_page(width=LETTER_WIDTH, height=LETTER_HEIGHT)
-                        scale = min(content_w / src_w, content_h / src_h)
-                        scaled_w = src_w * scale
-                        scaled_h = src_h * scale
-
-                        x_offset = OPT_MARGIN + (content_w - scaled_w) / 2
-                        y_offset = OPT_MARGIN
-
-                        target_rect = fitz.Rect(
-                            x_offset, y_offset,
-                            x_offset + scaled_w, y_offset + scaled_h,
-                        )
-                        new_page.show_pdf_page(target_rect, src_doc, page_num)
+                    dst.insert_pdf(src, from_page=i, to_page=i)
                 else:
-                    # Non-Letter (A3, landscape, etc.) — scale to fit with margins
-                    new_page = dst_doc.new_page(width=LETTER_WIDTH, height=LETTER_HEIGHT)
-                    scale = min(content_w / src_w, content_h / src_h)
-                    scaled_w = src_w * scale
-                    scaled_h = src_h * scale
-
-                    x_offset = OPT_MARGIN + (content_w - scaled_w) / 2
-                    y_offset = OPT_MARGIN
-
-                    target_rect = fitz.Rect(
-                        x_offset, y_offset,
-                        x_offset + scaled_w, y_offset + scaled_h,
+                    # Scale entire page to fit Letter, preserving aspect ratio
+                    new_page = dst.new_page(width=LETTER_W, height=LETTER_H)
+                    scale = min(LETTER_W / w, LETTER_H / h)
+                    sw, sh = w * scale, h * scale
+                    x = (LETTER_W - sw) / 2
+                    y = (LETTER_H - sh) / 2
+                    new_page.show_pdf_page(
+                        fitz.Rect(x, y, x + sw, y + sh), src, i
                     )
-                    new_page.show_pdf_page(target_rect, src_doc, page_num)
-
-                pages_kept += 1
-
-            # Fail-safe: if everything was skipped, return original
-            if pages_kept == 0:
-                logger.warning("Optimize: all pages skipped, returning original PDF")
-                src_doc.close()
-                dst_doc.close()
-                return pdf_bytes
-
-            result = dst_doc.tobytes()
-            logger.info(
-                f"Optimize: {len(src_doc)} pages → {pages_kept} pages, all US Letter with margins"
-            )
-            src_doc.close()
-            dst_doc.close()
+            result = dst.tobytes()
+            src.close()
+            dst.close()
             return result
-
         except Exception as e:
-            logger.error(f"PDF optimization failed, returning original: {e}")
+            logger.error(f"Page size normalization failed: {e}")
             return pdf_bytes
 
     def redact_pii_from_pdf(self, pdf_bytes: bytes) -> bytes:
@@ -2027,10 +1895,11 @@ Return ONLY the business purpose statement, nothing else."""
                 addr_lines_found = 0
                 while addr_lines_found < ADDRESS_LABEL_MAX_LINES and i + j < len(all_lines):
                     next_text = all_lines[i + j]["text"].strip()
-                    # Stop at another label, an amount, or empty text
+                    # Stop at another label, an amount, empty text, or prose
                     if (not next_text
                             or ADDRESS_LABELS.search(next_text)
-                            or AMOUNT_LINE_PATTERN.match(next_text)):
+                            or AMOUNT_LINE_PATTERN.match(next_text)
+                            or len(next_text) > 80):  # prose lines, not addresses
                         break
                     # Skip time-only lines (e.g. "9:30 AM") — don't redact or count
                     if TIME_LINE_PATTERN.match(next_text):
@@ -2189,10 +2058,14 @@ Return ONLY the business purpose statement, nothing else."""
         wb = load_workbook(template_path)
         ws = wb["Expenses"]
 
+        def _safe(val):
+            """Strip characters that openpyxl considers illegal for Excel."""
+            return ILLEGAL_CHARACTERS_RE.sub("", val) if isinstance(val, str) else val
+
         # ── Fill header fields ──
         name = f"{metadata.get('first_name', '')} {metadata.get('last_name', '')}".strip()
-        ws["B1"] = name
-        ws["B2"] = metadata.get("description", "")
+        ws["B1"] = _safe(name)
+        ws["B2"] = _safe(metadata.get("description", ""))
 
         start_date = metadata.get("start_date", "")
         end_date = metadata.get("end_date", "")
@@ -2257,7 +2130,7 @@ Return ONLY the business purpose statement, nothing else."""
                 row = start + i
                 ws.cell(row=row, column=2, value=expense.date)       # B: Date
                 ws.cell(row=row, column=3, value=round(amount_usd, 2))  # C: USD Amt
-                ws.cell(row=row, column=4, value=expense.description)   # D: Notes
+                ws.cell(row=row, column=4, value=_safe(expense.description))  # D: Notes
 
         # ── Update SUM formula if rows were inserted ──
         total_row = 44 + rows_inserted
@@ -2297,7 +2170,7 @@ Return ONLY the business purpose statement, nothing else."""
         if not merged_pdf:
             merged_pdf = self.merge_files_to_pdf(files_data)
             if merged_pdf:
-                merged_pdf = self._optimize_merged_pdf(merged_pdf)
+                merged_pdf = self._normalize_page_sizes(merged_pdf)
                 merged_pdf = self.redact_pii_from_pdf(merged_pdf)
         if not merged_pdf:
             return False, 0, "Failed to merge files into PDF", None, None
@@ -3409,7 +3282,7 @@ Return ONLY the business purpose statement, nothing else."""
         if st.session_state.uploaded_files_data and not st.session_state.get("merged_pdf_bytes"):
             merged_pdf = self.merge_files_to_pdf(st.session_state.uploaded_files_data)
             if merged_pdf:
-                merged_pdf = self._optimize_merged_pdf(merged_pdf)
+                merged_pdf = self._normalize_page_sizes(merged_pdf)
                 merged_pdf = self.redact_pii_from_pdf(merged_pdf)
                 st.session_state.merged_pdf_bytes = merged_pdf
 
