@@ -2,7 +2,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import gspread
 from google.oauth2.service_account import Credentials
@@ -2721,6 +2721,8 @@ Return ONLY the business purpose statement, nothing else."""
     def render_expense_review(self):
         """Render the expense review interface organized by UC Berkeley sections"""
         if not st.session_state.expenses:
+            # Still show the manual add form so users can add per diems without uploading
+            self._render_manual_expense_form()
             return
 
         # Auto-correct categories for all expenses (only run once per upload)
@@ -2998,12 +3000,32 @@ Return ONLY the business purpose statement, nothing else."""
                 render_expense_editor(i, expense, "lodging")
             st.info(f"**Lodging Subtotal: ${lodging_total:.2f}**")
 
-        # === ADD MANUAL EXPENSE ===
+        self._render_manual_expense_form()
+
+    def _render_manual_expense_form(self):
+        """Render the manual expense entry form with date range support for daily expenses"""
         st.markdown("---")
         st.markdown("### ➕ Add Manual Expense")
-        st.caption("Add expenses not on receipts (mileage, tips, etc.)")
+        st.caption("Add expenses not on receipts (meal per diems, mileage, tips, etc.)")
 
         with st.expander("Click to add a manual expense", expanded=False):
+            # Category and meal type are outside the form so they react immediately
+            # and control which date fields appear (single date vs date range)
+            cat_col1, cat_col2 = st.columns(2)
+            with cat_col1:
+                category_options = list(EXPENSE_CATEGORIES.values())
+                manual_category = st.selectbox(
+                    "Category*", options=category_options, key="manual_cat"
+                )
+            with cat_col2:
+                manual_meal_type = None
+                if manual_category == "Meal":
+                    manual_meal_type = st.selectbox(
+                        "Meal Type", options=MEAL_TYPES, key="manual_meal"
+                    )
+
+            is_daily = manual_category in ("Meal", "Lodging")
+
             with st.form("manual_expense_form", clear_on_submit=True):
                 col1, col2 = st.columns(2)
 
@@ -3020,16 +3042,23 @@ Return ONLY the business purpose statement, nothing else."""
                     )
 
                 with col2:
-                    manual_date = st.date_input("Date*", value=datetime.now().date())
-                    # Category selection with all options
-                    category_options = list(EXPENSE_CATEGORIES.values())
-                    manual_category = st.selectbox(
-                        "Category*", options=category_options
-                    )
-                    # Show meal type if meal is selected
-                    manual_meal_type = None
-                    if manual_category == "Meal":
-                        manual_meal_type = st.selectbox("Meal Type", options=MEAL_TYPES)
+                    # For daily categories (Meal/Lodging), allow a date range
+                    # so users can enter per diems for multiple days at once
+                    if is_daily:
+                        st.caption("Enter a date range to create one expense per day")
+                        dr_col1, dr_col2 = st.columns(2)
+                        with dr_col1:
+                            manual_date_start = st.date_input(
+                                "Start Date*", value=datetime.now().date()
+                            )
+                        with dr_col2:
+                            manual_date_end = st.date_input(
+                                "End Date*", value=datetime.now().date()
+                            )
+                    else:
+                        manual_date = st.date_input(
+                            "Date*", value=datetime.now().date()
+                        )
 
                 manual_destination = st.text_input(
                     "Destination (optional)", placeholder="e.g., Boston, MA"
@@ -3046,23 +3075,43 @@ Return ONLY the business purpose statement, nothing else."""
                                 cat_key = key
                                 break
 
-                        new_expense = ExpenseData(
-                            filename="Manual Entry",
-                            description=manual_description,
-                            amount=manual_amount,
-                            currency=manual_currency,
-                            date=manual_date.strftime("%Y-%m-%d"),
-                            category=cat_key or manual_category,
-                            confidence=1.0,
-                            meal_type=manual_meal_type,
-                            destination=(
-                                manual_destination if manual_destination else None
-                            ),
-                        )
-                        st.session_state.expenses.append(new_expense)
-                        st.success(
-                            f"✅ Added: {manual_description} - ${manual_amount:.2f}"
-                        )
+                        # Build list of dates (single date or range for daily expenses)
+                        if is_daily:
+                            if manual_date_end < manual_date_start:
+                                st.error("End date must be on or after start date")
+                                return
+                            num_days = (manual_date_end - manual_date_start).days + 1
+                            expense_dates = [
+                                (manual_date_start + timedelta(days=d)).strftime("%Y-%m-%d")
+                                for d in range(num_days)
+                            ]
+                        else:
+                            expense_dates = [manual_date.strftime("%Y-%m-%d")]
+
+                        for exp_date in expense_dates:
+                            new_expense = ExpenseData(
+                                filename="Manual Entry",
+                                description=manual_description,
+                                amount=manual_amount,
+                                currency=manual_currency,
+                                date=exp_date,
+                                category=cat_key or manual_category,
+                                confidence=1.0,
+                                meal_type=manual_meal_type,
+                                destination=(
+                                    manual_destination if manual_destination else None
+                                ),
+                            )
+                            st.session_state.expenses.append(new_expense)
+
+                        if len(expense_dates) > 1:
+                            st.success(
+                                f"✅ Added {len(expense_dates)} days: {manual_description} - ${manual_amount:.2f}/day"
+                            )
+                        else:
+                            st.success(
+                                f"✅ Added: {manual_description} - ${manual_amount:.2f}"
+                            )
                         st.rerun()
                     else:
                         st.error("Please fill in description and amount")
