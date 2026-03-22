@@ -305,6 +305,7 @@ ADDRESS_PATTERNS = [
 class ExpenseReportApp:
     def __init__(self):
         logger.info("Initializing ExpenseReportApp")
+        self._last_api_error = None  # Track last OpenAI error for user-facing messages
         self.setup_session_state()
         logger.info("ExpenseReportApp initialized successfully")
 
@@ -559,9 +560,10 @@ Return ONLY valid JSON with these fields, nothing else."""
     def analyze_expense_with_gpt_image(
         self, image_file, filename: str, context: str = "", max_retries: int = 3
     ) -> Optional[ExpenseData]:
-        """Analyze expense image directly using GPT-5 vision API"""
+        """Analyze expense image directly using GPT-5.4 vision API"""
         client = self.get_openai_client()
         if not client:
+            self._last_api_error = "OpenAI API key not configured"
             return None
 
         for attempt in range(max_retries):
@@ -582,7 +584,7 @@ Return ONLY valid JSON with these fields, nothing else."""
 
                 # Use structured outputs for reliable JSON extraction
                 response = client.beta.chat.completions.parse(
-                    model="gpt-5.2",
+                    model="gpt-5.4",
                     messages=[
                         {
                             "role": "system",
@@ -613,14 +615,13 @@ Return ONLY valid JSON with these fields, nothing else."""
                 if not extracted_data:
                     if attempt < max_retries - 1:
                         st.warning(
-                            f"Empty response from GPT-5 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
+                            f"Empty response from GPT-5.4 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
                         )
                         time.sleep(2)
                         continue
                     else:
-                        st.error(
-                            f"Empty response from GPT-5 after {max_retries} attempts"
-                        )
+                        self._last_api_error = f"Empty response from GPT-5.4 after {max_retries} attempts"
+                        st.error(self._last_api_error)
                         return None
 
                 # Log extracted personal information
@@ -671,9 +672,8 @@ Return ONLY valid JSON with these fields, nothing else."""
                     time.sleep(2)
                     continue
                 else:
-                    st.error(
-                        f"Error with GPT-5 image processing after {max_retries} attempts: {str(e)}"
-                    )
+                    self._last_api_error = f"Error with GPT-5.4 image processing after {max_retries} attempts: {str(e)}"
+                    st.error(self._last_api_error)
                     return None
 
         return None  # All retries exhausted
@@ -681,9 +681,10 @@ Return ONLY valid JSON with these fields, nothing else."""
     def analyze_expense_with_gpt_direct_pdf(
         self, pdf_file, filename: str, context: str = "", max_retries: int = 3
     ) -> Optional[ExpenseData]:
-        """Analyze PDF directly using GPT-5 vision without text extraction"""
+        """Analyze PDF directly using GPT-5.4 vision without text extraction"""
         client = self.get_openai_client()
         if not client:
+            self._last_api_error = "OpenAI API key not configured"
             return None
 
         for attempt in range(max_retries):
@@ -710,7 +711,7 @@ Return ONLY valid JSON with these fields, nothing else."""
 
                 # Use structured outputs for reliable JSON extraction
                 response = client.beta.chat.completions.parse(
-                    model="gpt-5.2",
+                    model="gpt-5.4",
                     messages=[
                         {
                             "role": "system",
@@ -744,14 +745,13 @@ Return ONLY valid JSON with these fields, nothing else."""
                 if not extracted_data:
                     if attempt < max_retries - 1:
                         st.warning(
-                            f"Empty response from GPT-5 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
+                            f"Empty response from GPT-5.4 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
                         )
                         time.sleep(2)
                         continue
                     else:
-                        st.error(
-                            f"Empty response from GPT-5 after {max_retries} attempts"
-                        )
+                        self._last_api_error = f"Empty response from GPT-5.4 after {max_retries} attempts"
+                        st.error(self._last_api_error)
                         return None
 
                 # Log extracted personal information
@@ -805,9 +805,8 @@ Return ONLY valid JSON with these fields, nothing else."""
                     time.sleep(2)
                     continue
                 else:
-                    st.error(
-                        f"Error with direct PDF processing after {max_retries} attempts: {str(e)}"
-                    )
+                    self._last_api_error = f"Error with direct PDF processing after {max_retries} attempts: {str(e)}"
+                    st.error(self._last_api_error)
                     logger.error(f"Failed to process {filename} after all retries")
                     return None
 
@@ -816,9 +815,10 @@ Return ONLY valid JSON with these fields, nothing else."""
     def analyze_expense_with_gpt_fallback(
         self, text: str, filename: str, context: str = ""
     ) -> Optional[ExpenseData]:
-        """Fallback method: Analyze expense text using GPT-5 (for non-PDF files)"""
+        """Fallback method: Analyze expense text using GPT-5.4 (for non-PDF files)"""
         client = self.get_openai_client()
         if not client:
+            self._last_api_error = "OpenAI API key not configured"
             return None
 
         prompt = f"""{self.get_expense_analysis_prompt(context)}
@@ -828,7 +828,7 @@ Document text:
 
         try:
             response = client.beta.chat.completions.parse(
-                model="gpt-5.2",
+                model="gpt-5.4",
                 messages=[
                     {
                         "role": "system",
@@ -842,7 +842,8 @@ Document text:
             extracted_data = response.choices[0].message.parsed
 
             if not extracted_data:
-                st.error("Empty response from GPT-5")
+                self._last_api_error = "Empty response from GPT-5.4 (text fallback)"
+                st.error(self._last_api_error)
                 return None
 
             # Log extracted personal information
@@ -886,7 +887,8 @@ Document text:
             )
 
         except Exception as e:
-            st.error(f"Error calling OpenAI API: {str(e)}")
+            self._last_api_error = f"OpenAI API error: {str(e)}"
+            st.error(self._last_api_error)
             logger.error(f"Error in fallback processing: {str(e)}")
             return None
 
@@ -1188,7 +1190,7 @@ Return ONLY the business purpose statement, nothing else."""
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.2",
+                model="gpt-5.4",
                 messages=[
                     {
                         "role": "system",
@@ -2479,7 +2481,7 @@ Return ONLY the business purpose statement, nothing else."""
         st.checkbox(
             "🤖 Use AI to generate compliant business purpose (slower, more accurate)",
             value=st.session_state.use_ai_business_purpose,
-            help="Enable this to use AI (GPT-5) to generate a UC Berkeley-compliant business purpose. Disabled by default for faster processing.",
+            help="Enable this to use AI (GPT-5.4) to generate a UC Berkeley-compliant business purpose. Disabled by default for faster processing.",
             key="use_ai_business_purpose",
         )
 
@@ -2510,7 +2512,7 @@ Return ONLY the business purpose statement, nothing else."""
     def process_single_file(self, file, context: str = ""):
         """Process a single file and return expense data"""
         try:
-            # Use GPT-5 direct processing for both PDFs and images
+            # Use GPT-5.4 direct processing for both PDFs and images
             if file.type == "application/pdf":
                 # Check file size before processing
                 file.seek(0)
@@ -2530,7 +2532,7 @@ Return ONLY the business purpose statement, nothing else."""
                 )
                 if expense_data:
                     success_msg = (
-                        f"✅ Processed {file.name} with GPT-5 direct PDF analysis"
+                        f"✅ Processed {file.name} with GPT-5.4 direct PDF analysis"
                     )
                     # Add personal info to message
                     if (
@@ -2573,24 +2575,26 @@ Return ONLY the business purpose statement, nothing else."""
                                 )
                             return expense_data, success_msg, "success"
                         else:
+                            error_detail = f" — {self._last_api_error}" if self._last_api_error else ""
                             return (
                                 None,
-                                f"❌ Failed to analyze {file.name} even with text extraction",
+                                f"❌ Failed to analyze {file.name} even with text extraction{error_detail}",
                                 "error",
                             )
                     else:
+                        error_detail = f" — {self._last_api_error}" if self._last_api_error else ""
                         return (
                             None,
-                            f"❌ Could not extract text from {file.name}",
+                            f"❌ Could not extract text from {file.name}{error_detail}",
                             "error",
                         )
             else:
-                # For images, use GPT-5 vision directly
+                # For images, use GPT-5.4 vision directly
                 expense_data = self.analyze_expense_with_gpt_image(
                     file, file.name, context
                 )
                 if expense_data:
-                    success_msg = f"✅ Processed {file.name} with GPT-5 vision"
+                    success_msg = f"✅ Processed {file.name} with GPT-5.4 vision"
                     if (
                         expense_data.first_name
                         or expense_data.last_name
@@ -2605,7 +2609,8 @@ Return ONLY the business purpose statement, nothing else."""
                         success_msg += f" | 📋 Extracted: {', '.join(personal_parts)}"
                     return expense_data, success_msg, "success"
                 else:
-                    return None, f"❌ Failed to analyze {file.name}", "error"
+                    error_detail = f" — {self._last_api_error}" if self._last_api_error else ""
+                    return None, f"❌ Failed to analyze {file.name}{error_detail}", "error"
 
         except Exception as e:
             return None, f"❌ Error processing {file.name}: {str(e)}", "error"
@@ -3507,7 +3512,7 @@ Return ONLY the business purpose statement, nothing else."""
                 """
             <div class="main-header">
                 <h1 class="main-title">🐻 Haas Expense Report Automation</h1>
-                <p class="haas-subtitle">UC Berkeley Haas School of Business | AI-Powered with GPT-5</p>
+                <p class="haas-subtitle">UC Berkeley Haas School of Business | AI-Powered with GPT-5.4</p>
             </div>
             """,
                 unsafe_allow_html=True,
