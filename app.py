@@ -67,65 +67,114 @@ st.markdown(
     
     /* Header styling */
     .main-header {
-        background: linear-gradient(135deg, var(--berkeley-blue) 0%, var(--founders-rock) 100%);
-        padding: 2rem;
+        background: linear-gradient(135deg, var(--berkeley-blue) 0%, #1F5F82 100%);
+        border: 1px solid rgba(253, 181, 21, 0.28);
+        border-bottom: 4px solid var(--california-gold);
         border-radius: 8px;
-        margin-bottom: 1rem;
-        border-bottom: 5px solid var(--california-gold);
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.18);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1.5rem;
+        margin: 1rem 0 0.8rem 0;
+        padding: 1.2rem 1.35rem;
     }
-    
+
     .main-title {
         color: white;
-        font-size: 2.5rem;
+        font-size: 2rem;
         font-weight: 700;
+        letter-spacing: 0;
+        line-height: 1.15;
         margin: 0;
-        text-align: center;
     }
-    
+
     .haas-subtitle {
-        color: var(--california-gold);
-        font-size: 1.2rem;
-        text-align: center;
-        margin-top: 0.5rem;
+        color: #F7D37B;
+        font-size: 0.98rem;
+        margin-top: 0.35rem;
         font-weight: 500;
     }
 
-    .app-status-bar {
+    .model-pill {
+        border: 1px solid rgba(253, 181, 21, 0.45);
+        border-radius: 999px;
+        color: white;
+        font-size: 0.88rem;
+        font-weight: 600;
+        padding: 0.45rem 0.75rem;
+        white-space: nowrap;
+    }
+
+    .top-actions {
+        margin: 0.35rem 0 0.9rem 0;
+    }
+
+    .step-grid {
         display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        grid-template-columns: repeat(3, minmax(0, 1fr));
         gap: 0.75rem;
-        margin: 1rem 0 0.75rem 0;
+        margin: 1rem 0 0.45rem 0;
     }
 
-    .app-status-chip {
-        border: 1px solid rgba(0, 50, 98, 0.18);
-        border-left: 5px solid var(--california-gold);
+    .step-card {
+        border: 1px solid rgba(148, 163, 184, 0.22);
         border-radius: 8px;
-        padding: 0.85rem 1rem;
-        background: #f8fafc;
+        padding: 0.9rem 1rem;
+        min-height: 76px;
     }
 
-    .app-status-chip strong {
-        display: block;
-        color: var(--berkeley-blue);
+    .step-card.complete {
+        background: rgba(45, 106, 79, 0.16);
+        border-left: 4px solid #2D6A4F;
+    }
+
+    .step-card.current {
+        background: rgba(0, 50, 98, 0.82);
+        border-left: 4px solid var(--california-gold);
+    }
+
+    .step-card.todo {
+        background: rgba(70, 83, 94, 0.18);
+        border-left: 4px solid rgba(148, 163, 184, 0.55);
+    }
+
+    .step-kicker {
+        color: #F7D37B;
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0;
+        line-height: 1.2;
+        margin-bottom: 0.25rem;
+    }
+
+    .step-title {
+        color: white;
         font-size: 1rem;
-        line-height: 1.3;
+        font-weight: 700;
+        line-height: 1.25;
     }
 
-    .app-status-chip span {
-        display: block;
-        color: var(--pacific-blue);
+    .step-caption {
+        color: rgba(255, 255, 255, 0.72);
         font-size: 0.85rem;
+        line-height: 1.3;
         margin-top: 0.15rem;
     }
 
-    .app-status-chip.ok {
-        border-left-color: #2D6A4F;
+    .progress-label {
+        color: rgba(255, 255, 255, 0.78);
+        font-size: 0.86rem;
+        font-weight: 600;
+        margin-top: 0.35rem;
     }
 
-    .app-status-chip.warn {
-        border-left-color: var(--california-gold);
+    .config-alert {
+        border: 1px solid rgba(253, 181, 21, 0.42);
+        border-left: 4px solid var(--california-gold);
+        border-radius: 8px;
+        margin: 0.6rem 0 0.8rem 0;
+        padding: 0.75rem 0.9rem;
     }
     
     /* Button styling */
@@ -2469,32 +2518,25 @@ Return ONLY the business purpose statement, nothing else."""
         else:
             logger.warning("Google Sheets credentials missing")
 
-        openai_class = "ok" if openai_ok else "warn"
-        sheets_class = "ok" if sheets_ok else "warn"
-        openai_status = "OpenAI API Key Found" if openai_ok else "OpenAI API Key Missing"
-        sheets_status = (
-            "Google Sheets Credentials Found"
-            if sheets_ok
-            else "Google Sheets Credentials Missing"
-        )
+        missing_items = []
+        if not openai_ok:
+            missing_items.append("OpenAI")
+        if not sheets_ok:
+            missing_items.append("Google Sheets")
 
-        st.markdown(
-            f"""
-            <div class="app-status-bar">
-                <div class="app-status-chip {openai_class}">
-                    <strong>{openai_status}</strong>
-                    <span>Document extraction</span>
+        if missing_items:
+            missing_text = ", ".join(missing_items)
+            st.markdown(
+                f"""
+                <div class="config-alert">
+                    <strong>Configuration needed:</strong> {missing_text}
                 </div>
-                <div class="app-status-chip {sheets_class}">
-                    <strong>{sheets_status}</strong>
-                    <span>Submission export</span>
-                </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+                """,
+                unsafe_allow_html=True,
+            )
 
-        action_col1, action_col2, _ = st.columns([1, 1.2, 4])
+        st.markdown('<div class="top-actions">', unsafe_allow_html=True)
+        _, action_col1, action_col2 = st.columns([5.4, 1.1, 1.35])
         with action_col1:
             if st.button("🔒 Log Out", use_container_width=True):
                 st.session_state.authenticated = False
@@ -2504,6 +2546,7 @@ Return ONLY the business purpose statement, nothing else."""
             if st.button("🗑️ Clear All Data", use_container_width=True):
                 self.reset_report_state()
                 st.rerun()
+        st.markdown("</div>", unsafe_allow_html=True)
 
         logger.info("App controls rendered successfully")
 
@@ -3686,34 +3729,53 @@ Return ONLY the business purpose statement, nothing else."""
         else:
             current_step = 3
 
-        # Render progress bar
-        col1, col2, col3 = st.columns(3)
+        def step_class(step_number: int, complete: bool) -> str:
+            if complete:
+                return "complete"
+            if current_step == step_number:
+                return "current"
+            return "todo"
 
-        with col1:
-            if step1_complete:
-                st.success("✅ **Step 1: Upload**\nDocuments processed")
-            elif current_step == 1:
-                st.info("📎 **Step 1: Upload**\nUpload & process documents")
-            else:
-                st.write("⬜ **Step 1: Upload**")
+        steps = [
+            {
+                "number": "01",
+                "title": "Upload",
+                "caption": "Add receipts and context",
+                "class": step_class(1, step1_complete),
+            },
+            {
+                "number": "02",
+                "title": "Review",
+                "caption": "Check categories and totals",
+                "class": step_class(2, step2_complete),
+            },
+            {
+                "number": "03",
+                "title": "Submit",
+                "caption": "Export final artifacts",
+                "class": step_class(3, False),
+            },
+        ]
 
-        with col2:
-            if step2_complete:
-                st.success("✅ **Step 2: Review**\nExpenses verified")
-            elif current_step == 2:
-                st.info("📊 **Step 2: Review**\nReview & edit expenses")
-            else:
-                st.write("⬜ **Step 2: Review**")
-
-        with col3:
-            if step3_ready:
-                st.info("🚀 **Step 3: Submit**\nReady to submit!")
-            else:
-                st.write("⬜ **Step 3: Submit**")
+        step_cards = "".join(
+            (
+                f'<div class="step-card {step["class"]}">'
+                f'<div class="step-kicker">{step["number"]}</div>'
+                f'<div class="step-title">{step["title"]}</div>'
+                f'<div class="step-caption">{step["caption"]}</div>'
+                "</div>"
+            )
+            for step in steps
+        )
+        st.markdown(f'<div class="step-grid">{step_cards}</div>', unsafe_allow_html=True)
 
         # Progress percentage
         progress = (1 if step1_complete else 0) + (1 if step2_complete else 0)
-        st.progress(progress / 3, text=f"Progress: {progress}/3 steps complete")
+        st.markdown(
+            f'<div class="progress-label">Progress: {progress}/3 steps complete</div>',
+            unsafe_allow_html=True,
+        )
+        st.progress(progress / 3)
         st.markdown("---")
 
     def run(self):
@@ -3730,16 +3792,14 @@ Return ONLY the business purpose statement, nothing else."""
             st.markdown(
                 f"""
             <div class="main-header">
-                <h1 class="main-title">🐻 Haas Expense Report Automation</h1>
-                <p class="haas-subtitle">UC Berkeley Haas School of Business | AI-Powered with {model_name}</p>
+                <div>
+                    <h1 class="main-title">🐻 Haas Expense Automation</h1>
+                    <div class="haas-subtitle">UC Berkeley Haas School of Business</div>
+                </div>
+                <div class="model-pill">{model_name}</div>
             </div>
             """,
                 unsafe_allow_html=True,
-            )
-
-            st.markdown(
-                "**Upload your expense documents and let AI extract and categorize the information automatically.** "
-                "Perfect for faculty, staff, and researchers managing travel and business expenses."
             )
 
             self.render_app_controls()
