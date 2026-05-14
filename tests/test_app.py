@@ -67,6 +67,18 @@ class ExpenseReportAppTests(unittest.TestCase):
         self.assertEqual(expense_type, "DAILY")
         self.assertEqual(meal_type, "INCIDENTAL")
 
+    def test_ground_transport_filename_override(self):
+        category, expense_type, meal_type = self.app.auto_correct_category(
+            "Square receipt with custom amount",
+            "Meal",
+            None,
+            filename="reimbursement__taxi1.pdf",
+        )
+
+        self.assertEqual(category, "Other Ground Transportation")
+        self.assertEqual(expense_type, "TRANSPORTATION")
+        self.assertIsNone(meal_type)
+
     def test_membership_category_override(self):
         category, expense_type, meal_type = self.app.auto_correct_category(
             "ASA professional membership dues",

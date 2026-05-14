@@ -353,6 +353,20 @@ CONFERENCE_DESCRIPTION_PATTERNS = [
     ]
 ]
 
+GROUND_TRANSPORT_DESCRIPTION_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"(?<![a-z0-9])taxi\d*(?![a-z0-9])",
+        r"(?<![a-z0-9])cab\d*(?![a-z0-9])",
+        r"\bshuttle\b",
+        r"\brideshare\b",
+        r"\bride\s+(?:with|from|to)\b",
+        r"\buber\s+(?:trip|ride)\b",
+        r"\blyft\s+(?:trip|ride)\b",
+        r"\bground\s+transport(?:ation)?\b",
+    ]
+]
+
 
 # PII patterns for redaction
 PII_PATTERNS = {
@@ -627,19 +641,34 @@ class ExpenseReportApp:
             return None
 
     def auto_correct_category(
-        self, description: str, category: str, meal_type: Optional[str]
+        self,
+        description: str,
+        category: str,
+        meal_type: Optional[str],
+        filename: str = "",
     ) -> tuple:
         """
         Validate common category misses and map category to expense_type.
         """
         description = description or ""
+        filename = filename or ""
+        category_context = f"{filename} {description}"
 
-        if any(pattern.search(description) for pattern in CONFERENCE_DESCRIPTION_PATTERNS):
+        if any(
+            pattern.search(category_context)
+            for pattern in CONFERENCE_DESCRIPTION_PATTERNS
+        ):
             return "Conference/Event Registration", "MISCELLANEOUS", meal_type
 
-        if any(pattern.search(description) for pattern in MEAL_DESCRIPTION_PATTERNS):
+        if any(pattern.search(category_context) for pattern in MEAL_DESCRIPTION_PATTERNS):
             corrected_meal_type = meal_type or "INCIDENTAL"
             return "Meal", "DAILY", corrected_meal_type
+
+        if any(
+            pattern.search(category_context)
+            for pattern in GROUND_TRANSPORT_DESCRIPTION_PATTERNS
+        ):
+            return "Other Ground Transportation", "TRANSPORTATION", meal_type
 
         # Normalize category to match expected values
         category_mapping = {
@@ -833,7 +862,10 @@ Return ONLY valid JSON with these fields, nothing else."""
                 category = extracted_data.category or "OTHER_MISC"
                 corrected_category, corrected_expense_type, corrected_meal_type = (
                     self.auto_correct_category(
-                        description, category, extracted_data.meal_type
+                        description,
+                        category,
+                        extracted_data.meal_type,
+                        filename=filename,
                     )
                 )
 
@@ -964,7 +996,10 @@ Return ONLY valid JSON with these fields, nothing else."""
                 category = extracted_data.category or "OTHER_MISC"
                 corrected_category, corrected_expense_type, corrected_meal_type = (
                     self.auto_correct_category(
-                        description, category, extracted_data.meal_type
+                        description,
+                        category,
+                        extracted_data.meal_type,
+                        filename=filename,
                     )
                 )
 
@@ -1057,7 +1092,10 @@ Document text:
             category = extracted_data.category or "OTHER_MISC"
             corrected_category, corrected_expense_type, corrected_meal_type = (
                 self.auto_correct_category(
-                    description, category, extracted_data.meal_type
+                    description,
+                    category,
+                    extracted_data.meal_type,
+                    filename=filename,
                 )
             )
 
@@ -3004,7 +3042,10 @@ Return ONLY the business purpose statement, nothing else."""
                 old_category = exp.category
                 corrected_category, corrected_expense_type, corrected_meal_type = (
                     self.auto_correct_category(
-                        exp.description, exp.category, exp.meal_type
+                        exp.description,
+                        exp.category,
+                        exp.meal_type,
+                        filename=exp.filename,
                     )
                 )
                 if corrected_category != old_category:
