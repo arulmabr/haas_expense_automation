@@ -8,6 +8,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 import openai
 import os
+import hmac
 from dataclasses import dataclass
 import logging
 import time
@@ -42,12 +43,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_OPENAI_MODEL = "gpt-5.5"
+
 # Configure page
 st.set_page_config(
     page_title="Haas Expense Report Automation",
     page_icon="🐻",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # Add Haas UC Berkeley branding with custom CSS
@@ -66,8 +69,9 @@ st.markdown(
     .main-header {
         background: linear-gradient(135deg, var(--berkeley-blue) 0%, var(--founders-rock) 100%);
         padding: 2rem;
-        border-radius: 10px;
-        margin-bottom: 2rem;
+        border-radius: 8px;
+        margin-bottom: 1rem;
+        border-bottom: 5px solid var(--california-gold);
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
     }
     
@@ -85,6 +89,43 @@ st.markdown(
         text-align: center;
         margin-top: 0.5rem;
         font-weight: 500;
+    }
+
+    .app-status-bar {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 0.75rem;
+        margin: 1rem 0 0.75rem 0;
+    }
+
+    .app-status-chip {
+        border: 1px solid rgba(0, 50, 98, 0.18);
+        border-left: 5px solid var(--california-gold);
+        border-radius: 8px;
+        padding: 0.85rem 1rem;
+        background: #f8fafc;
+    }
+
+    .app-status-chip strong {
+        display: block;
+        color: var(--berkeley-blue);
+        font-size: 1rem;
+        line-height: 1.3;
+    }
+
+    .app-status-chip span {
+        display: block;
+        color: var(--pacific-blue);
+        font-size: 0.85rem;
+        margin-top: 0.15rem;
+    }
+
+    .app-status-chip.ok {
+        border-left-color: #2D6A4F;
+    }
+
+    .app-status-chip.warn {
+        border-left-color: var(--california-gold);
     }
     
     /* Button styling */
@@ -116,15 +157,6 @@ st.markdown(
     .stTabs [aria-selected="true"] {
         background-color: var(--california-gold);
         color: var(--berkeley-blue);
-    }
-    
-    /* Sidebar styling */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, var(--berkeley-blue) 0%, var(--pacific-blue) 100%);
-    }
-    
-    [data-testid="stSidebar"] * {
-        color: white !important;
     }
     
     /* Success/Info boxes */
@@ -237,6 +269,41 @@ CURRENCY_OPTIONS = [
     "BRL",
 ]
 
+MEAL_DESCRIPTION_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"\buber\s*eats\b",
+        r"\bdoor\s*dash\b",
+        r"\bdoordash\b",
+        r"\bgrubhub\b",
+        r"\bpostmates\b",
+        r"\bdelivery\b",
+        r"\brestaurant\b",
+        r"\bcaf[eé]\b",
+        r"\bcoffee\b",
+        r"\bbar\b",
+        r"\bfood\b",
+        r"\bmeal\b",
+        r"\bdining\b",
+        r"\bbreakfast\b",
+        r"\blunch\b",
+        r"\bdinner\b",
+    ]
+]
+
+CONFERENCE_DESCRIPTION_PATTERNS = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in [
+        r"\bconference\s+(?:registration|fee|ticket)\b",
+        r"\bevent\s+(?:registration|fee|ticket)\b",
+        r"\bregistration\s+(?:fee|cost|payment)\b",
+        r"\bmembership\b",
+        r"\bassociation\s+dues\b",
+        r"\bprofessional\s+dues\b",
+        r"\bsociety\s+dues\b",
+    ]
+]
+
 
 # PII patterns for redaction
 PII_PATTERNS = {
@@ -312,6 +379,8 @@ class ExpenseReportApp:
     def setup_session_state(self):
         """Initialize session state variables"""
         logger.info("Setting up session state")
+        if "authenticated" not in st.session_state:
+            st.session_state.authenticated = False
         if "expenses" not in st.session_state:
             st.session_state.expenses = []
         if "metadata" not in st.session_state:
@@ -337,6 +406,57 @@ class ExpenseReportApp:
         if "merged_pdf_bytes" not in st.session_state:
             st.session_state.merged_pdf_bytes = None
         logger.info("Session state setup complete")
+
+    @staticmethod
+    def get_configured_app_password() -> Optional[str]:
+        """Read the shared app password from Streamlit secrets or the environment."""
+        try:
+            secret_password = st.secrets.get("APP_PASSWORD")
+        except Exception:
+            secret_password = None
+
+        password = secret_password or os.getenv("APP_PASSWORD")
+        if password is None:
+            return None
+
+        password = str(password).strip()
+        return password or None
+
+    @staticmethod
+    def password_matches(submitted_password: str, expected_password: str) -> bool:
+        """Compare passwords without leaking timing information."""
+        if not submitted_password or not expected_password:
+            return False
+        return hmac.compare_digest(str(submitted_password), str(expected_password))
+
+    def render_auth_gate(self) -> bool:
+        """Render the shared-password gate and return True when access is allowed."""
+        expected_password = self.get_configured_app_password()
+        if not expected_password:
+            st.error("Expense automation access is not configured.")
+            st.info(
+                "Set APP_PASSWORD in Streamlit secrets or the environment before using this app."
+            )
+            return False
+
+        if st.session_state.get("authenticated", False):
+            return True
+
+        st.title("Haas Expense Report Automation")
+        st.caption("Private tool for Haas expense processing.")
+
+        with st.form("app_password_form"):
+            submitted_password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Log in", type="primary")
+
+        if submitted:
+            if self.password_matches(submitted_password, expected_password):
+                st.session_state.authenticated = True
+                st.rerun()
+            else:
+                st.error("Incorrect password.")
+
+        return False
 
     def is_valid_email(self, email: str, allow_external: bool = False) -> bool:
         """
@@ -402,6 +522,17 @@ class ExpenseReportApp:
             st.error(f"Failed to initialize OpenAI client: {str(e)}")
             return None
 
+    @staticmethod
+    def get_openai_model() -> str:
+        """Read the model from config, defaulting to the current frontier model."""
+        try:
+            configured_model = st.secrets.get("OPENAI_MODEL")
+        except Exception:
+            configured_model = None
+
+        model = configured_model or os.getenv("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL
+        return str(model).strip() or DEFAULT_OPENAI_MODEL
+
     def get_google_sheets_client(self):
         """Initialize Google Sheets client"""
         try:
@@ -450,9 +581,17 @@ class ExpenseReportApp:
         self, description: str, category: str, meal_type: Optional[str]
     ) -> tuple:
         """
-        Minimal validation of category - relies on GPT for proper categorization.
-        Only maps category to expense_type for grouping purposes.
+        Validate common category misses and map category to expense_type.
         """
+        description = description or ""
+
+        if any(pattern.search(description) for pattern in CONFERENCE_DESCRIPTION_PATTERNS):
+            return "Conference/Event Registration", "MISCELLANEOUS", meal_type
+
+        if any(pattern.search(description) for pattern in MEAL_DESCRIPTION_PATTERNS):
+            corrected_meal_type = meal_type or "INCIDENTAL"
+            return "Meal", "DAILY", corrected_meal_type
+
         # Normalize category to match expected values
         category_mapping = {
             "MEAL": ("Meal", "DAILY"),
@@ -560,11 +699,12 @@ Return ONLY valid JSON with these fields, nothing else."""
     def analyze_expense_with_gpt_image(
         self, image_file, filename: str, context: str = "", max_retries: int = 3
     ) -> Optional[ExpenseData]:
-        """Analyze expense image directly using GPT-5.4 vision API"""
+        """Analyze expense image directly using the configured OpenAI model."""
         client = self.get_openai_client()
         if not client:
             self._last_api_error = "OpenAI API key not configured"
             return None
+        model_name = self.get_openai_model()
 
         for attempt in range(max_retries):
             try:
@@ -584,7 +724,7 @@ Return ONLY valid JSON with these fields, nothing else."""
 
                 # Use structured outputs for reliable JSON extraction
                 response = client.beta.chat.completions.parse(
-                    model="gpt-5.4",
+                    model=model_name,
                     messages=[
                         {
                             "role": "system",
@@ -615,12 +755,12 @@ Return ONLY valid JSON with these fields, nothing else."""
                 if not extracted_data:
                     if attempt < max_retries - 1:
                         st.warning(
-                            f"Empty response from GPT-5.4 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
+                            f"Empty response from {model_name} for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
                         )
                         time.sleep(2)
                         continue
                     else:
-                        self._last_api_error = f"Empty response from GPT-5.4 after {max_retries} attempts"
+                        self._last_api_error = f"Empty response from {model_name} after {max_retries} attempts"
                         st.error(self._last_api_error)
                         return None
 
@@ -672,7 +812,7 @@ Return ONLY valid JSON with these fields, nothing else."""
                     time.sleep(2)
                     continue
                 else:
-                    self._last_api_error = f"Error with GPT-5.4 image processing after {max_retries} attempts: {str(e)}"
+                    self._last_api_error = f"Error with {model_name} image processing after {max_retries} attempts: {str(e)}"
                     st.error(self._last_api_error)
                     return None
 
@@ -681,11 +821,12 @@ Return ONLY valid JSON with these fields, nothing else."""
     def analyze_expense_with_gpt_direct_pdf(
         self, pdf_file, filename: str, context: str = "", max_retries: int = 3
     ) -> Optional[ExpenseData]:
-        """Analyze PDF directly using GPT-5.4 vision without text extraction"""
+        """Analyze PDF directly using the configured OpenAI model without text extraction."""
         client = self.get_openai_client()
         if not client:
             self._last_api_error = "OpenAI API key not configured"
             return None
+        model_name = self.get_openai_model()
 
         for attempt in range(max_retries):
             try:
@@ -711,7 +852,7 @@ Return ONLY valid JSON with these fields, nothing else."""
 
                 # Use structured outputs for reliable JSON extraction
                 response = client.beta.chat.completions.parse(
-                    model="gpt-5.4",
+                    model=model_name,
                     messages=[
                         {
                             "role": "system",
@@ -745,12 +886,12 @@ Return ONLY valid JSON with these fields, nothing else."""
                 if not extracted_data:
                     if attempt < max_retries - 1:
                         st.warning(
-                            f"Empty response from GPT-5.4 for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
+                            f"Empty response from {model_name} for {filename}, retrying... (Attempt {attempt + 1}/{max_retries})"
                         )
                         time.sleep(2)
                         continue
                     else:
-                        self._last_api_error = f"Empty response from GPT-5.4 after {max_retries} attempts"
+                        self._last_api_error = f"Empty response from {model_name} after {max_retries} attempts"
                         st.error(self._last_api_error)
                         return None
 
@@ -815,11 +956,12 @@ Return ONLY valid JSON with these fields, nothing else."""
     def analyze_expense_with_gpt_fallback(
         self, text: str, filename: str, context: str = ""
     ) -> Optional[ExpenseData]:
-        """Fallback method: Analyze expense text using GPT-5.4 (for non-PDF files)"""
+        """Fallback method: analyze expense text using the configured OpenAI model."""
         client = self.get_openai_client()
         if not client:
             self._last_api_error = "OpenAI API key not configured"
             return None
+        model_name = self.get_openai_model()
 
         prompt = f"""{self.get_expense_analysis_prompt(context)}
 
@@ -828,7 +970,7 @@ Document text:
 
         try:
             response = client.beta.chat.completions.parse(
-                model="gpt-5.4",
+                model=model_name,
                 messages=[
                     {
                         "role": "system",
@@ -842,7 +984,7 @@ Document text:
             extracted_data = response.choices[0].message.parsed
 
             if not extracted_data:
-                self._last_api_error = "Empty response from GPT-5.4 (text fallback)"
+                self._last_api_error = f"Empty response from {model_name} (text fallback)"
                 st.error(self._last_api_error)
                 return None
 
@@ -1190,7 +1332,7 @@ Return ONLY the business purpose statement, nothing else."""
 
         try:
             response = client.chat.completions.create(
-                model="gpt-5.4",
+                model=self.get_openai_model(),
                 messages=[
                     {
                         "role": "system",
@@ -1808,6 +1950,37 @@ Return ONLY the business purpose statement, nothing else."""
             logger.error(f"Page size normalization failed: {e}")
             return pdf_bytes
 
+    def _rasterize_pdf_pages(self, pdf_bytes: bytes, page_numbers: set[int]) -> bytes:
+        """Flatten selected pages after redaction so covered text is not extractable."""
+        if not page_numbers:
+            return pdf_bytes
+
+        try:
+            src = fitz.open(stream=pdf_bytes, filetype="pdf")
+            dst = fitz.open()
+            matrix = fitz.Matrix(2, 2)
+
+            for page_num in range(len(src)):
+                if page_num not in page_numbers:
+                    dst.insert_pdf(src, from_page=page_num, to_page=page_num)
+                    continue
+
+                page = src[page_num]
+                raster_page = dst.new_page(width=page.rect.width, height=page.rect.height)
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                raster_page.insert_image(page.rect, pixmap=pix)
+
+            output = dst.tobytes(garbage=4, deflate=True)
+            src.close()
+            dst.close()
+            logger.info(
+                f"Flattened {len(page_numbers)} redacted page(s) to remove hidden text"
+            )
+            return output
+        except Exception as e:
+            logger.error(f"PDF flattening failed, returning non-flattened PDF: {e}")
+            return pdf_bytes
+
     def redact_pii_from_pdf(self, pdf_bytes: bytes) -> bytes:
         """
         Redact PII (emails, phone numbers, addresses) from a PDF's text layer.
@@ -1816,6 +1989,10 @@ Return ONLY the business purpose statement, nothing else."""
         try:
             doc = fitz.open(stream=pdf_bytes, filetype="pdf")
             redaction_count = 0
+            pages_to_flatten = set()
+            image_redact_mode = getattr(
+                fitz, "PDF_REDACT_IMAGE_PIXELS", fitz.PDF_REDACT_IMAGE_NONE
+            )
 
             for page_num in range(len(doc)):
                 page = doc[page_num]
@@ -1825,9 +2002,12 @@ Return ONLY the business purpose statement, nothing else."""
                     # Image-only page — use OCR with word-level bounding boxes
                     ocr_count = self._redact_ocr_page(page, page_num)
                     redaction_count += ocr_count
+                    if ocr_count:
+                        pages_to_flatten.add(page_num)
                     continue
 
                 # Text-layer page — use standard search_for approach
+                page_redaction_count = 0
                 for pattern_name, pattern in PII_PATTERNS.items():
                     for match in pattern.finditer(page_text):
                         matched_text = match.group()
@@ -1837,17 +2017,22 @@ Return ONLY the business purpose statement, nothing else."""
                         for rect in rects:
                             page.add_redact_annot(rect, fill=(0, 0, 0))
                             redaction_count += 1
+                            page_redaction_count += 1
 
                 # Redact addresses (ride locations, street addresses, etc.)
-                self._redact_addresses(page)
+                address_redactions = self._redact_addresses(page)
+                redaction_count += address_redactions
+                page_redaction_count += address_redactions
 
-                # Apply all redactions on this page (keep underlying images intact)
-                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+                # Apply redactions, then flatten this page so covered text cannot be copied.
+                if page_redaction_count:
+                    page.apply_redactions(images=image_redact_mode)
+                    pages_to_flatten.add(page_num)
 
             logger.info(f"PII redaction complete: {redaction_count} items redacted across {len(doc)} pages")
-            redacted_bytes = doc.tobytes()
+            redacted_bytes = doc.tobytes(garbage=4, deflate=True)
             doc.close()
-            return redacted_bytes
+            return self._rasterize_pdf_pages(redacted_bytes, pages_to_flatten)
 
         except Exception as e:
             logger.error(f"PII redaction failed, returning original PDF: {str(e)}")
@@ -1861,6 +2046,7 @@ Return ONLY the business purpose statement, nothing else."""
         """
         text_dict = page.get_text("dict")
         blocks = text_dict.get("blocks", [])
+        redaction_count = 0
 
         # Collect all text lines with their positions
         all_lines = []
@@ -1890,6 +2076,7 @@ Return ONLY the business purpose statement, nothing else."""
                     rects = page.search_for(after_label.strip())
                     for rect in rects:
                         page.add_redact_annot(rect, fill=(0, 0, 0))
+                        redaction_count += 1
 
                 # Redact subsequent lines (addresses can span multiple lines:
                 # name, street, apt/unit, city/state/zip, country)
@@ -1910,6 +2097,7 @@ Return ONLY the business purpose statement, nothing else."""
                     rects = page.search_for(next_text)
                     for rect in rects:
                         page.add_redact_annot(rect, fill=(0, 0, 0))
+                        redaction_count += 1
                     addr_lines_found += 1
                     j += 1
 
@@ -1921,6 +2109,9 @@ Return ONLY the business purpose statement, nothing else."""
                 rects = page.search_for(matched_text)
                 for rect in rects:
                     page.add_redact_annot(rect, fill=(0, 0, 0))
+                    redaction_count += 1
+
+        return redaction_count
 
     def _redact_ocr_page(self, page, page_num: int) -> int:
         """
@@ -2018,7 +2209,10 @@ Return ONLY the business purpose statement, nothing else."""
                     j += 1
 
         if redaction_count > 0:
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+            image_redact_mode = getattr(
+                fitz, "PDF_REDACT_IMAGE_PIXELS", fitz.PDF_REDACT_IMAGE_NONE
+            )
+            page.apply_redactions(images=image_redact_mode)
             logger.info(f"OCR redaction on page {page_num + 1}: {redaction_count} items")
 
         return redaction_count
@@ -2229,61 +2423,89 @@ Return ONLY the business purpose statement, nothing else."""
             logger.error(f"Failed to generate presigned URL: {str(e)}")
             return None
 
-    def render_sidebar(self):
-        """Render the sidebar with configuration options"""
-        logger.info("Rendering sidebar")
+    @staticmethod
+    def has_openai_api_key() -> bool:
+        """Return whether an OpenAI API key is configured."""
+        return bool(st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY"))
 
-        # Haas branded sidebar header
-        st.sidebar.markdown(
-            """
-        <div style="text-align: center; padding: 1rem 0; border-bottom: 3px solid #FDB515; margin-bottom: 1rem;">
-            <h2 style="color: #FDB515; margin: 0; font-size: 1.5rem;">🐻 Haas FSU</h2>
-            <p style="color: #FDB515; font-size: 0.9rem; margin: 0.3rem 0 0 0;">Expense Automation</p>
-        </div>
-        """,
+    @staticmethod
+    def has_google_sheets_credentials() -> bool:
+        """Return whether Google Sheets credentials are configured."""
+        return bool(
+            "google_credentials" in st.secrets or os.path.exists("google-credentials.json")
+        )
+
+    @staticmethod
+    def reset_report_state():
+        """Clear the current report while keeping the authenticated session."""
+        st.session_state.expenses = []
+        st.session_state.metadata = {}
+        st.session_state.processing_complete = False
+        st.session_state.show_event_info = False
+        st.session_state.additional_context = ""
+        st.session_state.include_external_emails = False
+        st.session_state.use_ai_business_purpose = False
+        st.session_state.uploaded_files_data = {}
+        st.session_state.auto_correction_done = False
+        st.session_state.submission_success = False
+        st.session_state.s3_upload_message = None
+        st.session_state.s3_presigned_url = None
+        st.session_state.merged_pdf_bytes = None
+
+    def render_app_controls(self):
+        """Render status and account actions in the main page, not a sidebar."""
+        logger.info("Rendering app controls")
+
+        openai_ok = self.has_openai_api_key()
+        sheets_ok = self.has_google_sheets_credentials()
+
+        if openai_ok:
+            logger.info("OpenAI API key found")
+        else:
+            logger.warning("OpenAI API key missing")
+
+        if sheets_ok:
+            logger.info("Google Sheets credentials found")
+        else:
+            logger.warning("Google Sheets credentials missing")
+
+        openai_class = "ok" if openai_ok else "warn"
+        sheets_class = "ok" if sheets_ok else "warn"
+        openai_status = "OpenAI API Key Found" if openai_ok else "OpenAI API Key Missing"
+        sheets_status = (
+            "Google Sheets Credentials Found"
+            if sheets_ok
+            else "Google Sheets Credentials Missing"
+        )
+
+        st.markdown(
+            f"""
+            <div class="app-status-bar">
+                <div class="app-status-chip {openai_class}">
+                    <strong>{openai_status}</strong>
+                    <span>Document extraction</span>
+                </div>
+                <div class="app-status-chip {sheets_class}">
+                    <strong>{sheets_status}</strong>
+                    <span>Submission export</span>
+                </div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
 
-        st.sidebar.title("🔧 Configuration")
+        action_col1, action_col2, _ = st.columns([1, 1.2, 4])
+        with action_col1:
+            if st.button("🔒 Log Out", use_container_width=True):
+                st.session_state.authenticated = False
+                st.rerun()
 
-        # API Status
-        st.sidebar.subheader("API Status")
+        with action_col2:
+            if st.button("🗑️ Clear All Data", use_container_width=True):
+                self.reset_report_state()
+                st.rerun()
 
-        # Check OpenAI - only check if API key exists, don't initialize
-        api_key = st.secrets.get("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY")
-        if api_key:
-            st.sidebar.success("✅ OpenAI API Key Found")
-            logger.info("OpenAI API key found")
-        else:
-            st.sidebar.error("❌ OpenAI API Key Missing")
-            logger.warning("OpenAI API key missing")
-
-        # Check Google Sheets - only check if credentials exist, don't initialize
-        if "google_credentials" in st.secrets or os.path.exists(
-            "google-credentials.json"
-        ):
-            st.sidebar.success("✅ Google Sheets Credentials Found")
-            logger.info("Google Sheets credentials found")
-        else:
-            st.sidebar.warning("⚠️ Google Sheets Credentials Missing")
-            logger.warning("Google Sheets credentials missing")
-
-        st.sidebar.markdown("---")
-        logger.info("Sidebar rendered successfully")
-
-        # Clear data button
-        if st.sidebar.button("🗑️ Clear All Data"):
-            st.session_state.expenses = []
-            st.session_state.metadata = {}
-            st.session_state.processing_complete = False
-            st.session_state.show_event_info = False
-            st.session_state.uploaded_files_data = {}
-            st.session_state.auto_correction_done = False
-            st.session_state.submission_success = False
-            st.session_state.s3_upload_message = None
-            st.session_state.s3_presigned_url = None
-            st.session_state.merged_pdf_bytes = None
-            st.rerun()
+        logger.info("App controls rendered successfully")
 
     def render_metadata_form(self):
         """Render the metadata collection form"""
@@ -2451,6 +2673,7 @@ Return ONLY the business purpose statement, nothing else."""
     def render_file_upload(self):
         """Render the file upload and processing section"""
         st.header("📎 Upload Expense Documents")
+        model_name = self.get_openai_model()
 
         # Show a note about event information
         if not st.session_state.metadata:
@@ -2481,7 +2704,7 @@ Return ONLY the business purpose statement, nothing else."""
         st.checkbox(
             "🤖 Use AI to generate compliant business purpose (slower, more accurate)",
             value=st.session_state.use_ai_business_purpose,
-            help="Enable this to use AI (GPT-5.4) to generate a UC Berkeley-compliant business purpose. Disabled by default for faster processing.",
+            help=f"Enable this to use AI ({model_name}) to generate a UC Berkeley-compliant business purpose. Disabled by default for faster processing.",
             key="use_ai_business_purpose",
         )
 
@@ -2511,8 +2734,9 @@ Return ONLY the business purpose statement, nothing else."""
 
     def process_single_file(self, file, context: str = ""):
         """Process a single file and return expense data"""
+        model_name = self.get_openai_model()
         try:
-            # Use GPT-5.4 direct processing for both PDFs and images
+            # Use the configured model for direct processing of both PDFs and images
             if file.type == "application/pdf":
                 # Check file size before processing
                 file.seek(0)
@@ -2532,7 +2756,7 @@ Return ONLY the business purpose statement, nothing else."""
                 )
                 if expense_data:
                     success_msg = (
-                        f"✅ Processed {file.name} with GPT-5.4 direct PDF analysis"
+                        f"✅ Processed {file.name} with {model_name} direct PDF analysis"
                     )
                     # Add personal info to message
                     if (
@@ -2589,12 +2813,12 @@ Return ONLY the business purpose statement, nothing else."""
                             "error",
                         )
             else:
-                # For images, use GPT-5.4 vision directly
+                # For images, use the configured model directly
                 expense_data = self.analyze_expense_with_gpt_image(
                     file, file.name, context
                 )
                 if expense_data:
-                    success_msg = f"✅ Processed {file.name} with GPT-5.4 vision"
+                    success_msg = f"✅ Processed {file.name} with {model_name} vision"
                     if (
                         expense_data.first_name
                         or expense_data.last_name
@@ -3343,6 +3567,9 @@ Return ONLY the business purpose statement, nothing else."""
         # Show download button for combined PDF (before submission)
         if st.session_state.get("merged_pdf_bytes"):
             st.markdown("### 📄 Combined Receipts PDF")
+            st.warning(
+                "Please review the redacted PDF before submission. Automatic redaction catches personal emails, phone numbers, and addresses, but rare misses are possible."
+            )
             col1, col2 = st.columns(2)
             with col1:
                 st.download_button(
@@ -3436,19 +3663,7 @@ Return ONLY the business purpose statement, nothing else."""
         # Start over option
         st.markdown("---")
         if st.button("🔄 Start New Report", use_container_width=True):
-            st.session_state.expenses = []
-            st.session_state.metadata = {}
-            st.session_state.processing_complete = False
-            st.session_state.show_event_info = False
-            st.session_state.additional_context = ""
-            st.session_state.include_external_emails = False
-            st.session_state.use_ai_business_purpose = False
-            st.session_state.uploaded_files_data = {}
-            st.session_state.auto_correction_done = False
-            st.session_state.submission_success = False
-            st.session_state.s3_upload_message = None
-            st.session_state.s3_presigned_url = None
-            st.session_state.merged_pdf_bytes = None
+            self.reset_report_state()
             st.rerun()
 
     def render_progress_indicator(self):
@@ -3504,15 +3719,19 @@ Return ONLY the business purpose statement, nothing else."""
     def run(self):
         """Main application runner"""
         logger.info("Starting main run method")
+        if not self.render_auth_gate():
+            return
+
         try:
             logger.info("Setting title and markdown")
+            model_name = self.get_openai_model()
 
             # Haas branded header
             st.markdown(
-                """
+                f"""
             <div class="main-header">
                 <h1 class="main-title">🐻 Haas Expense Report Automation</h1>
-                <p class="haas-subtitle">UC Berkeley Haas School of Business | AI-Powered with GPT-5.4</p>
+                <p class="haas-subtitle">UC Berkeley Haas School of Business | AI-Powered with {model_name}</p>
             </div>
             """,
                 unsafe_allow_html=True,
@@ -3523,11 +3742,10 @@ Return ONLY the business purpose statement, nothing else."""
                 "Perfect for faculty, staff, and researchers managing travel and business expenses."
             )
 
-            # Render sidebar
-            logger.info("About to render sidebar")
-            self.render_sidebar()
-            logger.info("Sidebar rendered")
+            self.render_app_controls()
         except Exception as e:
+            if RerunException is not None and isinstance(e, RerunException):
+                raise
             logger.error(f"Error in run method header: {str(e)}")
             st.error(f"Error in run method: {str(e)}")
             import traceback
